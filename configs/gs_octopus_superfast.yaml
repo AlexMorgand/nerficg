@@ -1,0 +1,164 @@
+# FasterGS — octopus asset, PLY init + frozen geometry, wall-clock optimized.
+# Tuned for: strong Mesh2Splat / compressed PLY init, appearance-only refinement, low-res training.
+# For full-res polish, copy this file, set DATASET.IMAGE_SCALE_FACTOR: 1, lower OPTIMIZER SH LRs, raise NUM_ITERATIONS.
+
+GLOBAL:
+    LOG_LEVEL: 2
+    GPU_INDICES:
+        - 0
+    RANDOM_SEED: 0
+    ANOMALY_DETECTION: false
+    FILTER_WARNINGS: true
+    METHOD_TYPE: FasterGS
+    DATASET_TYPE: Colmap
+
+MODEL:
+    SH_DEGREE: 3
+
+RENDERER:
+    USE_FUSED_COVARIANCE_COMPUTATION: true
+    USE_FUSED_SH_CONVERSION: true
+    SCALE_MODIFIER: 1.0
+    DISABLE_SH0: false
+    DISABLE_SH1: false
+    DISABLE_SH2: false
+    DISABLE_SH3: false
+    USE_BAKED_COVARIANCE: false
+    PROPER_ANTIALIASING: false  # faster raster path; short full-res tail can re-enable if needed
+
+TRAINING:
+    USE_RANDOM_BACKGROUND_COLOR: true
+    RANDOM_BACKGROUND_IF_ALPHA_OR_MASK: true
+
+    # PLY init (compressed recommended for I/O); scene_alignment_transform applied when DATASET.APPLY_PCA
+    INITIALIZATION_GAUSSIAN_PLY_PATH: "/home/alex/Simulon/dev/nerficg/octopus.ply"
+    FREEZE_INITIAL_GAUSSIAN_GEOMETRY: true
+    KEEP_THIN_SPLATS: true
+    ENABLE_DENSIFICATION_WITH_GAUSSIAN_PLY_INIT: false  # no densify overhead; enable if you need new geometry
+    DENSIFICATION_GRAD_THRESHOLD_MULTIPLIER_GAUSSIAN_PLY_INIT: 4.0
+    DENSIFICATION_INTERVAL_MULTIPLIER_GAUSSIAN_PLY_INIT: 4
+
+    EXTERNAL_MASKS_PATH: "/home/alex/Simulon/dev/Asset_reconstruction/octopus/masks"
+    DEBUG_MASK_VIS:
+        ENABLED: false
+        INTERVAL: 1
+        WAIT_MS: 0
+
+    LOAD_CHECKPOINT: null
+    MODEL_NAME: octopus_superfast
+    NUM_ITERATIONS: 12_000
+    RUN_VALIDATION: false
+
+    DATA:
+        PRELOADING_LEVEL: 2
+        FIELDS: ['rgb', 'alpha']
+        PRECOMPUTE_RAYS: false
+        RAYS_TO_DEVICE: false
+
+    BACKUP:
+        FINAL_CHECKPOINT: true
+        RENDER_TESTSET: true
+        RENDER_TRAINSET: false
+        RENDER_VALSET: false
+        INTERMEDIATE_RENDERINGS: false
+        VISUALIZE_ERRORS: false
+        INTERVAL: -1
+        TRAINING_STATE: false
+
+    TIMING:
+        ACTIVATE: false
+        INCLUDE_DATALOADING_IN_TOTAL: true
+        INCLUDE_PRETRAINING_IN_TOTAL: true
+        INCLUDE_POSTTRAINING_IN_TOTAL: false
+
+    WANDB:
+        ACTIVATE: false
+        ENTITY: null
+        PROJECT: nerficg
+        LOG_IMAGES: false
+        INDEX_VALIDATION: -1
+        INDEX_TRAINING: -1
+        INTERVAL: 1000
+        SWEEP_MODE:
+            ACTIVE: false
+            START_ITERATION: 999
+            ITERATION_STRIDE: 1000
+            NUM_IMAGES: -1
+
+    WRITE_VRAM_STATS: false
+
+    GUI:
+        ACTIVATE: true
+        RENDER_INTERVAL: 5
+        GUI_STATUS_ENABLED: false
+        GUI_STATUS_INTERVAL: 20
+        SKIP_GUI_SETUP: true
+        FPS_ROLLING_AVERAGE_SIZE: 100
+
+    DENSIFICATION_START_ITERATION: 600
+    DENSIFICATION_END_ITERATION: 14_900
+    DENSIFICATION_INTERVAL: 100
+    DENSIFICATION_GRAD_THRESHOLD: 0.0002
+    DENSIFICATION_PERCENT_DENSE: 0.01
+    SPEEDYSPLAT_PRUNING:
+        USE: false
+        START_ITERATION: 6_000
+        END_ITERATION: 30_000
+        INTERVAL: 3_000
+        SOFT_PRUNING_RATIO: 0.8
+        HARD_PRUNING_RATIO: 0.3
+    USE_MCMC: false
+    MAX_PRIMITIVES: 1_000_000
+    OPACITY_RESET_INTERVAL: 3_000
+    EXTRA_OPACITY_RESET_ITERATION: 500
+    # Rare Morton reordering (expensive); with frozen geometry + no densify, ordering matters less mid-run
+    MORTON_ORDERING_INTERVAL: 50_000
+    MORTON_ORDERING_END_ITERATION: 12_000
+
+    FILTER_3D:
+        USE: false
+        ORIGINAL_FORMULATION: false
+        FILTER_VARIANCE: 0.2
+
+    NORMALIZE_LOSS_BY_MASK_AREA: true
+    MIN_OPACITY_AFTER_TRAINING: 0.00392156862745098
+
+    RANDOM_INITIALIZATION:
+        FORCE: false
+        N_POINTS: 100_000
+        ENABLE_CARVING: true
+        CARVING_IN_ALL_FRUSTUMS: false
+        CARVING_ENFORCE_ALPHA: false
+
+    # L1-heavy phase: less DSSIM work per step; add a short finetune with LAMBDA_DSSIM: 0.2 if highlights look soft
+    LOSS:
+        LAMBDA_L1: 0.92
+        LAMBDA_DSSIM: 0.08
+        LAMBDA_OPACITY_REGULARIZATION: 0.0
+        LAMBDA_SCALE_REGULARIZATION: 0.0
+
+    # Aggressive SH / appearance (geometry frozen in code path above)
+    OPTIMIZER:
+        LEARNING_RATE_MEANS_INIT: 0.00016
+        LEARNING_RATE_MEANS_FINAL: 1.6e-06
+        LEARNING_RATE_MEANS_MAX_STEPS: 12_000
+        LEARNING_RATE_SH_COEFFICIENTS_0: 0.008
+        LEARNING_RATE_SH_COEFFICIENTS_REST: 0.00035
+        LEARNING_RATE_OPACITIES: 0.02
+        LEARNING_RATE_SCALES: 0.005
+        LEARNING_RATE_ROTATIONS: 0.001
+
+DATASET:
+    PATH: "/home/alex/Simulon/dev/Asset_reconstruction/octopus"
+    IMAGE_SCALE_FACTOR: 1 #0.25
+    NORMALIZE_CUBE: null
+    NORMALIZE_RECENTER: false
+    BACKGROUND_COLOR:
+        - 0.0
+        - 0.0
+        - 0.0
+    NEAR_PLANE: 0.01
+    FAR_PLANE: 100.0
+    TEST_STEP: 8
+    APPLY_PCA: true
+    APPLY_PCA_RESCALE: false

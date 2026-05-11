@@ -116,6 +116,7 @@ class CustomDataset(BaseDataset):
             for view, c2w in zip(data, c2ws):
                 view.c2w = c2w
             self.point_cloud.transform(transformation)
+            self.scene_alignment_transform = transformation.astype(np.float64, copy=True)
 
         # create splits
         dataset: dict[str, list[View]] = {subset: [] for subset in self.subsets}

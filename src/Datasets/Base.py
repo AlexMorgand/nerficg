@@ -37,6 +37,8 @@ class BaseDataset(Framework.Configurable, ABC, Iterable[View]):
         self.mode = 'train'
         self._bounding_box: AxisAlignedBox | None = None
         self._point_cloud: BasicPointCloud | None = None  # TODO: only load on demand
+        # 4x4 world transform applied to COLMAP views/point cloud (e.g. transform_poses_pca); used to align PLY inits
+        self.scene_alignment_transform: np.ndarray | None = None
         self._camera_settings = SharedCameraSettings(
             background_color=torch.tensor(self.BACKGROUND_COLOR, dtype=torch.float32, device=Framework.config.GLOBAL.DEFAULT_DEVICE),
             near_plane=float(self.NEAR_PLANE),

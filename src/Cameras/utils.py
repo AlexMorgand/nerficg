@@ -208,6 +208,59 @@ def quaternion_to_rotation_matrix(quaternions: np.ndarray | torch.Tensor, normal
     return rotation_matrix[0] if batch_dim_added else rotation_matrix
 
 
+def _sqrt_positive_part(x: torch.Tensor) -> torch.Tensor:
+    """Numerically stable sqrt(max(x, 0)); used by rotation_matrix_to_quaternion."""
+    return torch.sqrt(torch.relu(torch.clamp_min(x, 1e-12)))
+
+
+def rotation_matrix_to_quaternion(matrix: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """
+    Convert rotation matrices to quaternions (w, x, y, z), matching quaternion_to_rotation_matrix.
+
+    Args:
+        matrix: tensor of shape (..., 3, 3).
+
+    Returns:
+        Quaternions of shape (..., 4) with (w, x, y, z) layout.
+    """
+    if matrix.shape[-2:] != (3, 3):
+        raise Framework.CameraError(f'rotation_matrix_to_quaternion expects (..., 3, 3), got {matrix.shape}')
+    batch_shape = matrix.shape[:-2]
+    m = matrix.reshape(-1, 3, 3)
+    m00, m01, m02 = m[:, 0, 0], m[:, 0, 1], m[:, 0, 2]
+    m10, m11, m12 = m[:, 1, 0], m[:, 1, 1], m[:, 1, 2]
+    m20, m21, m22 = m[:, 2, 0], m[:, 2, 1], m[:, 2, 2]
+
+    q_abs = _sqrt_positive_part(
+        torch.stack(
+            [
+                1.0 + m00 + m11 + m22,
+                1.0 + m00 - m11 - m22,
+                1.0 - m00 + m11 - m22,
+                1.0 - m00 - m11 + m22,
+            ],
+            dim=-1,
+        ).clamp_min(eps)
+    )
+
+    quat_by_rijk = torch.stack(
+        [
+            torch.stack([q_abs[:, 0] ** 2, m21 - m12, m02 - m20, m10 - m01], dim=-1),
+            torch.stack([m21 - m12, q_abs[:, 1] ** 2, m10 + m01, m02 + m20], dim=-1),
+            torch.stack([m02 - m20, m10 + m01, q_abs[:, 2] ** 2, m12 + m21], dim=-1),
+            torch.stack([m10 - m01, m20 + m02, m21 + m12, q_abs[:, 3] ** 2], dim=-1),
+        ],
+        dim=-2,
+    )
+
+    quat_candidates = quat_by_rijk / (2.0 * q_abs[:, None])
+
+    idx = q_abs.argmax(dim=-1)
+    batch_i = torch.arange(m.shape[0], device=m.device, dtype=torch.long)
+    quat = quat_candidates[batch_i, idx]
+    return torch.nn.functional.normalize(quat, dim=-1).reshape(batch_shape + (4,))
+
+
 def invert_3d_affine(transform: np.ndarray | torch.Tensor, is_rigid: bool = True) -> np.ndarray | torch.Tensor:
     """Inverts an 3D affine transformation matrix (shape 4x4). Assumes a rigid transformation by default."""
     if isinstance(transform, torch.Tensor):
