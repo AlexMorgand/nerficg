@@ -32,6 +32,8 @@ TRAINING:
 
     # PLY init (compressed recommended for I/O); scene_alignment_transform applied when DATASET.APPLY_PCA
     INITIALIZATION_GAUSSIAN_PLY_PATH: "/home/alex/Simulon/dev/nerficg/octopus.ply"
+    # Optional [r,g,b] in [0,1]: drop mesh SH — set DC from this RGB, zero all higher SH (train recovers detail).
+    INITIALIZATION_GAUSSIAN_PLY_DEFAULT_RGB: null  # e.g. [0.5, 0.5, 0.5]
     FREEZE_INITIAL_GAUSSIAN_GEOMETRY: true
     KEEP_THIN_SPLATS: true
     ENABLE_DENSIFICATION_WITH_GAUSSIAN_PLY_INIT: false  # no densify overhead; enable if you need new geometry
@@ -39,10 +41,6 @@ TRAINING:
     DENSIFICATION_INTERVAL_MULTIPLIER_GAUSSIAN_PLY_INIT: 4
 
     EXTERNAL_MASKS_PATH: "/home/alex/Simulon/dev/Asset_reconstruction/octopus/masks"
-    DEBUG_MASK_VIS:
-        ENABLED: false
-        INTERVAL: 1
-        WAIT_MS: 0
 
     LOAD_CHECKPOINT: null
     MODEL_NAME: octopus_superfast
@@ -125,6 +123,7 @@ TRAINING:
 
     RANDOM_INITIALIZATION:
         FORCE: false
+        IGNORE_GAUSSIAN_PLY: false  # true: skip PLY path; use COLMAP point cloud, or random AABB if FORCE
         N_POINTS: 100_000
         ENABLE_CARVING: true
         CARVING_IN_ALL_FRUSTUMS: false
