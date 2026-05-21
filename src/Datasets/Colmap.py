@@ -24,6 +24,10 @@ from Logging import Logger
     AABB_TOLERANCE_FACTOR=0.05,  # framework default is 0.1
     ESTIMATE_NEAR_FAR_FROM_SFM_POINTS=False,  # works well with methods that rely on tight near and far bounds
     EXTERNAL_MASKS_PATH=None,  # directory of per-image binary masks (0 ignore / 255 keep), matched to RGB filenames
+    TURNTABLE=Framework.ConfigParameterList(
+        ENABLED=False,  # fixed-camera turntable capture: rotate scene/gaussians per frame instead of moving camera
+        REFERENCE_FRAME_IDX=0,  # global frame index used as the fixed physical camera pose
+    ),
 )
 class CustomDataset(BaseDataset):
     """Dataset class for scenes in COLMAP format."""
@@ -180,6 +184,30 @@ class CustomDataset(BaseDataset):
         # estimate near and far plane from point cloud
         if self.ESTIMATE_NEAR_FAR_FROM_SFM_POINTS:
             self._camera_settings.near_plane, self._camera_settings.far_plane = estimate_near_far(data, self.point_cloud)
+
+        # Convert moving-camera COLMAP turntable poses into per-frame object transforms and a fixed camera.
+        # Geometry stays equivalent to the COLMAP reconstruction, but renderers can use the transform to
+        # keep view-dependent appearance in the original room/environment frame.
+        if self.TURNTABLE.ENABLED:
+            if not data:
+                raise Framework.DatasetError('TURNTABLE.ENABLED=True requires at least one COLMAP view.')
+            reference_idx = int(self.TURNTABLE.REFERENCE_FRAME_IDX)
+            if reference_idx < 0 or reference_idx >= len(data):
+                raise Framework.DatasetError(
+                    f'TURNTABLE.REFERENCE_FRAME_IDX={reference_idx} outside available view range [0, {len(data) - 1}]'
+                )
+            fixed_c2w = data[reference_idx].c2w_numpy
+            for view in data:
+                original_c2w = view.c2w_numpy
+                object_transform = fixed_c2w @ view.w2c_numpy
+                view.exif['turntable_original_c2w'] = original_c2w
+                view.exif['turntable_fixed_c2w'] = fixed_c2w
+                view.exif['turntable_object_transform'] = object_transform
+                view.c2w = fixed_c2w
+            Logger.log_info(
+                f'enabled turntable mode with fixed camera at global frame {reference_idx}; '
+                'per-view object transforms stored in View.exif'
+            )
 
         # create splits
         dataset: dict[str, list[View]] = {subset: [] for subset in self.subsets}
