@@ -69,6 +69,32 @@ known_metrics: dict[str, tuple[Callable, Callable, bool]] = {
 }
 
 
+def _image_names(path: Path) -> list[str]:
+    return [
+        name for name in list_sorted_files(path)
+        if name.endswith('.png') or name.endswith('.jpg') or name.endswith('.jpeg')
+    ]
+
+
+def _assert_identical_filenames(kind: str, scene_name: str, expected: list[str], actual: list[str]) -> None:
+    if expected == actual:
+        return
+    expected_set = set(expected)
+    actual_set = set(actual)
+    missing = sorted(expected_set - actual_set)
+    extra = sorted(actual_set - expected_set)
+    details = []
+    if missing:
+        details.append(f'missing {kind}: {missing[:5]}')
+    if extra:
+        details.append(f'extra {kind}: {extra[:5]}')
+    raise RuntimeError(
+        f'filename mismatch for scene "{scene_name}" ({kind}). '
+        f'Expected {len(expected)} files, found {len(actual)}. '
+        + '; '.join(details)
+    )
+
+
 def write_empty_config_file(path: Path):
     """write and a default config file to the given base directory."""
     # get scenes and methods
@@ -89,6 +115,8 @@ def write_empty_config_file(path: Path):
 @torch.no_grad()
 def compute_metrics(
     results_path: Path,
+    scene_name: str,
+    expected_names: list[str],
     targets: list[torch.Tensor],
     mask_images: list[torch.Tensor | None],
     metrics: list[torchmetrics.Metric],
@@ -96,10 +124,16 @@ def compute_metrics(
 ) -> list[float]:
     """Calculate quality metrics."""
     method_name = results_path.name
-    image_filenames = [name for name in list_sorted_files(results_path) if name.endswith('.png') or name.endswith('.jpg') or name.endswith('.jpeg')]
+    image_filenames = _image_names(results_path)
+    _assert_identical_filenames('render outputs', scene_name, expected_names, image_filenames)
     results = load_images([
         str(results_path / name) for name in image_filenames
     ], scale_factor=None, num_threads=4, desc=f'loading {method_name} images')[0]
+    if len(results) != len(targets):
+        raise RuntimeError(
+            f'image count mismatch for scene "{scene_name}", method "{method_name}": '
+            f'{len(results)} results vs {len(targets)} targets'
+        )
     metric_values = [[] for _ in metrics]
     for result, target, mask in Logger.log_progress(zip(results, targets, mask_images), total=len(results), desc=f'calculate {method_name} metrics', leave=False):
         for metric, values, with_mask in zip(metrics, metric_values, metric_requires_mask):
@@ -150,13 +184,16 @@ def main(root_dir: Path, config_only: bool):
         if not gt_path.exists():
             Logger.log_info(f'no ground truth images available for scene {scene_name} -> exiting')
             return
+        gt_names = _image_names(gt_path)
         gt_images = load_images([
-            str(gt_path / name) for name in list_sorted_files(gt_path) if name.endswith('.png') or name.endswith('.jpg') or name.endswith('.jpeg')
+            str(gt_path / name) for name in gt_names
         ], scale_factor=None, num_threads=4, desc='loading reference images')[0]
         mask_path = scene_path / '_mask'
         if mask_path.exists():
+            mask_names = _image_names(mask_path)
+            _assert_identical_filenames('mask files', scene_name, gt_names, mask_names)
             mask_images = load_images([
-                str(mask_path / name) for name in list_sorted_files(mask_path) if name.endswith('.png') or name.endswith('.jpg') or name.endswith('.jpeg')
+                str(mask_path / name) for name in mask_names
             ], scale_factor=None, num_threads=4, desc='loading masks')[0]
             mask_images = [mask_image[:, :1] for mask_image in mask_images]
         else:
@@ -170,7 +207,15 @@ def main(root_dir: Path, config_only: bool):
                 for metric_name in metric_names:
                     results[metric_name][method_names.index(method_name)].append(0.0)
             else:
-                scene_metrics = compute_metrics(method_path, gt_images, mask_images, metric_functions, metric_requires_mask)
+                scene_metrics = compute_metrics(
+                    method_path,
+                    scene_name,
+                    gt_names,
+                    gt_images,
+                    mask_images,
+                    metric_functions,
+                    metric_requires_mask,
+                )
                 for metric_name, metric_value in zip(metric_names, scene_metrics):
                     results[metric_name][method_names.index(method_name)].append(metric_value)
     # build tables

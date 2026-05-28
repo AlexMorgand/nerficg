@@ -113,7 +113,20 @@ class BaseTrainer(Framework.Configurable, torch.nn.Module):
     def _render_dataset(self, dataset: BaseDataset, verbose: bool = True):
         self.model.eval()
         if self.BACKUP.RENDER_TESTSET:
-            self.renderer.render_subset(self.output_directory, dataset.test(), calculate_metrics=True, visualize_errors=self.BACKUP.VISUALIZE_ERRORS, verbose=verbose)
+            eval_subset = dataset.test()
+            if len(eval_subset) == 0:
+                Logger.log_warning(
+                    'BACKUP.RENDER_TESTSET is enabled but test split is empty; '
+                    'falling back to rendering/evaluating all training views.'
+                )
+                eval_subset = dataset.train()
+            self.renderer.render_subset(
+                self.output_directory,
+                eval_subset,
+                calculate_metrics=True,
+                visualize_errors=self.BACKUP.VISUALIZE_ERRORS,
+                verbose=verbose,
+            )
         if self.BACKUP.RENDER_TRAINSET:
             self.renderer.render_subset(self.output_directory, dataset.train(), calculate_metrics=False, visualize_errors=False, verbose=verbose)
         if self.BACKUP.RENDER_VALSET:
@@ -360,6 +373,14 @@ class BaseTrainer(Framework.Configurable, torch.nn.Module):
         # init modes
         self.model.eval()
         dataset.test()
+        wandb_metric_prefix = 'test'
+        if len(dataset) == 0:
+            Logger.log_warning(
+                'WANDB sweep metrics requested on test split, but test is empty; '
+                'falling back to train split metrics.'
+            )
+            dataset.train()
+            wandb_metric_prefix = 'train_as_test'
         num_images = len(dataset)
         subset_iterable = range(num_images)
         # optionally select a random subset
@@ -388,8 +409,8 @@ class BaseTrainer(Framework.Configurable, torch.nn.Module):
         combined_metrics = math.exp(mean([-0.1 * math.log(10.0) * psnr, math.log(math.sqrt(1.0 - ssim)), math.log(lpips)]))
         # log average metrics
         Framework.wandb.log({
-            'test_psnr': psnr,
-            'test_ssim': ssim,
-            'test_lpips': lpips,
+            f'{wandb_metric_prefix}_psnr': psnr,
+            f'{wandb_metric_prefix}_ssim': ssim,
+            f'{wandb_metric_prefix}_lpips': lpips,
             'combined_metrics': combined_metrics
         }, step=iteration, commit=True)

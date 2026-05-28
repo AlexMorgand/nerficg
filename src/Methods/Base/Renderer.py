@@ -100,13 +100,31 @@ class BaseRenderer(Framework.Configurable, ABC):
             'alpha_gt': alpha_gt,
         }
 
+    @staticmethod
+    def _evaluation_mask_for_view(view: View) -> torch.Tensor | None:
+        """Returns an evaluation mask (combine alpha and segmentation when both exist)."""
+        alpha_mask = view.alpha
+        segmentation_mask = view.segmentation
+        if alpha_mask is None and segmentation_mask is None:
+            return None
+        if alpha_mask is not None and alpha_mask.shape[0] > 1:
+            alpha_mask = alpha_mask[:1]
+        if segmentation_mask is not None and segmentation_mask.shape[0] > 1:
+            segmentation_mask = segmentation_mask[:1]
+        if alpha_mask is None:
+            return segmentation_mask.clamp(0.0, 1.0)
+        if segmentation_mask is None:
+            return alpha_mask.clamp(0.0, 1.0)
+        return alpha_mask.clamp(0.0, 1.0) * segmentation_mask.clamp(0.0, 1.0)
+
     @torch.no_grad()
     def compute_image_metrics(
         self,
         results_path: Path,
         target_path: Path,
         output_path: Path,
-        file_extension: str = 'png'
+        file_extension: str = 'png',
+        mask_path: Path | None = None,
     ) -> None:
         """Calculate quality metrics (PSNR, SSIM, LPIPS)."""
         Logger.log_info('calculating image quality metrics')
@@ -122,6 +140,14 @@ class BaseRenderer(Framework.Configurable, ABC):
             str(results_path / name) for name in list_sorted_files(results_path)
             if file_extension in name
         ], scale_factor=None, num_threads=4, desc='loading result')[0]
+        masks = None
+        if mask_path is not None and mask_path.exists():
+            masks = load_images([
+                str(mask_path / name) for name in list_sorted_files(mask_path)
+                if file_extension in name
+            ], scale_factor=None, num_threads=4, desc='loading eval masks')[0]
+            masks = [mask[:1] for mask in masks]
+            Logger.log_info('using masked evaluation for image quality metrics')
         torch.hub.set_dir(Framework.Directories.CACHE_DIR)
         metrics = {
             'PSNR': {
@@ -137,7 +163,18 @@ class BaseRenderer(Framework.Configurable, ABC):
                 'values': [], 'num_decimals': 3
             },
         }
-        for result, target in Logger.log_progress(zip(results, targets), total=len(results), desc='calculate metrics', leave=False):
+        if masks is None:
+            metric_iter = zip(results, targets)
+        else:
+            metric_iter = zip(results, targets, masks)
+        for metric_values in Logger.log_progress(metric_iter, total=len(results), desc='calculate metrics', leave=False):
+            if masks is None:
+                result, target = metric_values
+                mask = None
+            else:
+                result, target, mask = metric_values
+                result = result * mask
+                target = target * mask
             result = result.float().to(Framework.config.GLOBAL.DEFAULT_DEVICE)[None]
             target = target.float().to(Framework.config.GLOBAL.DEFAULT_DEVICE)[None]
             for metric_data in metrics.values():
@@ -246,6 +283,8 @@ class BaseRenderer(Framework.Configurable, ABC):
                     if (alpha_gt := view.alpha) is not None:
                         color_gt = apply_background_color(color_gt, alpha_gt, view.camera.background_color)
                     outputs['rgb_gt'] = color_gt
+                    if (eval_mask := self._evaluation_mask_for_view(view)) is not None:
+                        outputs['eval_mask'] = eval_mask
                 # append closest gt image
                 if closest_train and dataset.data['train'] and dataset.mode != 'test':
                     outputs['closest_train'] = min(dataset.data['train'], key=lambda other_view: torch.linalg.norm(view.position - other_view.position)).rgb  # TODO: gpu upload
@@ -262,7 +301,13 @@ class BaseRenderer(Framework.Configurable, ABC):
 
             # calculate quality metrics (PSNR, SSIM, LPIPS), reload saved 8bit images for comparability
             if calculate_metrics:
-                self.compute_image_metrics(output_directories['rgb'], output_directories['rgb_gt'], output_directory_main, image_extension)
+                self.compute_image_metrics(
+                    output_directories['rgb'],
+                    output_directories['rgb_gt'],
+                    output_directory_main,
+                    image_extension,
+                    output_directories.get('eval_mask'),
+                )
 
             # visualize differences between result and reference images
             if visualize_errors:

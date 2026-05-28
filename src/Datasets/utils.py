@@ -191,10 +191,16 @@ def apply_background_color(raw_rgb: torch.Tensor, alpha: torch.Tensor, backgroun
 
 def load_external_binary_mask(path: Path) -> torch.Tensor:
     """Loads a mask image as a binary tensor (0: ignore, 1: keep)."""
+    mask = load_external_soft_mask(path)
+    return (mask > 0.5).float()
+
+
+def load_external_soft_mask(path: Path) -> torch.Tensor:
+    """Loads a mask image as a soft tensor in [0, 1]."""
     mask = load_image_simple(path)
     if mask.shape[0] > 1:
         mask = mask[:1]
-    return (mask > 0.5).float()
+    return mask.clamp(0.0, 1.0)
 
 
 def resolve_external_mask_path(mask_root: Path, rgb_path: Path, images_root: Path) -> Path | None:
