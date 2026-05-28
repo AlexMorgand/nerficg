@@ -10,7 +10,7 @@ import Framework
 from Cameras.Perspective import PerspectiveCamera
 from Cameras.utils import RadialTangentialDistortion
 from Datasets.Base import BaseDataset
-from Datasets.utils import compute_scaled_image_size, View, ImageData, transform_poses_pca, BasicPointCloud, \
+from Datasets.utils import compute_scaled_image_size, read_image_size, View, ImageData, transform_poses_pca, BasicPointCloud, \
     load_inverted_segmentation_mask, load_external_binary_mask, load_disparity, apply_image_scale_factor, \
     load_optical_flow, apply_image_scale_factor_optical_flow, estimate_near_far, resolve_external_mask_path
 from Logging import Logger
@@ -18,6 +18,8 @@ from Logging import Logger
 
 @Framework.Configurable.configure(
     PATH='dataset/colmap/myscene',
+    IMAGE_FOLDER='images',  # image directory used for RGB supervision, relative to PATH
+    USE_IMAGE_SIZE_FOR_INTRINSICS=False,  # scale COLMAP intrinsics to the selected image folder's actual resolution
     TEST_STEP=0,
     APPLY_PCA=False,
     SFM_POINTS_FILTER_RATIO=1.0,  # 0.95 works well in practice
@@ -41,7 +43,6 @@ class CustomDataset(BaseDataset):
         reconstruction = pycolmap.Reconstruction(self.dataset_path / 'sparse' / '0')
         Logger.log_debug(reconstruction.summary())
 
-        images_root = self.dataset_path / 'images'
         external_masks_root = None
         if self.EXTERNAL_MASKS_PATH not in (None, ''):
             external_masks_root = Path(self.EXTERNAL_MASKS_PATH).expanduser()
@@ -56,6 +57,13 @@ class CustomDataset(BaseDataset):
         data: list[View] = []
         global_frame_idx = 0
         for camera_idx, colmap_camera in Logger.log_progress(enumerate(reconstruction.cameras.values()), desc=f'loading camera views', leave=False, total=len(cameras)):
+            # sort images belonging to this camera
+            images = [image for image in reconstruction.images.values() if image.camera.camera_id == colmap_camera.camera_id]
+            images = sorted(images, key=lambda image: image.name)
+            if not images:
+                continue
+            image_folder = self.dataset_path / self.IMAGE_FOLDER
+            reference_image_path = image_folder / images[0].name
             # load intrinsics
             match colmap_camera.model:
                 case pycolmap.CameraModelId.SIMPLE_PINHOLE:
@@ -93,7 +101,8 @@ class CustomDataset(BaseDataset):
                 case _:
                     raise Framework.DatasetError(f'Camera model {colmap_camera.model} from COLMAP is not yet supported.')
             # rescale intrinsics
-            width, height = compute_scaled_image_size((colmap_camera.width, colmap_camera.height), self.IMAGE_SCALE_FACTOR)
+            reference_size = read_image_size(reference_image_path) if self.USE_IMAGE_SIZE_FOR_INTRINSICS else (colmap_camera.width, colmap_camera.height)
+            width, height = compute_scaled_image_size(reference_size, self.IMAGE_SCALE_FACTOR)
             scale_factor_intrinsics_x = width / colmap_camera.width
             scale_factor_intrinsics_y = height / colmap_camera.height
             focal_x *= scale_factor_intrinsics_x
@@ -106,17 +115,14 @@ class CustomDataset(BaseDataset):
                 distortion=distortion,
             )
             cameras.append(camera)
-            # sort images belonging to this camera
-            images = [image for image in reconstruction.images.values() if image.camera.camera_id == colmap_camera.camera_id]
-            images = sorted(images, key=lambda image: image.name)
             # create View instances
             n_views = len(images)
             last_view_idx = n_views - 1
             idx2timestamp = 1 / last_view_idx
             for frame_idx, image in enumerate(images):
-                rgb_path = images_root / image.name
+                rgb_path = image_folder / image.name
                 if external_masks_root is not None:
-                    mask_path = resolve_external_mask_path(external_masks_root, rgb_path, images_root)
+                    mask_path = resolve_external_mask_path(external_masks_root, rgb_path, image_folder)
                     if mask_path is None:
                         raise Framework.DatasetError(
                             f'no external mask found for image "{rgb_path}" in "{external_masks_root}"'
