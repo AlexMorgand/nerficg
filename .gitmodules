@@ -1,3 +1,6 @@
 [submodule "src/ICGui"]
 	path = src/ICGui
 	url = git@github.com:AlexMorgand/icgui.git
+[submodule "submodules/Difix3D"]
+	path = submodules/Difix3D
+	url = git@github.com:nv-tlabs/Difix3D.git
