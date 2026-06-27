@@ -1,11 +1,12 @@
 from pathlib import Path
+import sys
 
 import Framework
 
 extension_dir = Path(__file__).parent
 __extension_name__ = extension_dir.name
 __install_command__ = [
-    'pip', 'install',
+    sys.executable, '-m', 'pip', 'install',
     str(extension_dir),
     '--no-build-isolation',
 ]

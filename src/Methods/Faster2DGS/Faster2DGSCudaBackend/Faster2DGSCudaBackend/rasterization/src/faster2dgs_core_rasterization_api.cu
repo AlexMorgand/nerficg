@@ -245,7 +245,8 @@ faster2dgs_core::rasterization::inference_wrapper(
         near_plane,
         far_plane,
         proper_antialiasing,
-        to_chw
+        to_chw,
+        true  // clamp_output — matches FasterGS inference_wrapper default
     );
 
     return image;

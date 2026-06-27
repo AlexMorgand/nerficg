@@ -135,12 +135,18 @@ class Faster2DGSRenderer(FasterGSRenderer):
                 rasterizer_settings=settings,
             )
         if not Faster2DGSRenderer._aux_stats_logged:
-            mx = float(auxiliary_maps.detach().abs().max().cpu())
-            Logger.log_info(
-                f'Faster2DGS auxiliary_maps abs max={mx:.6g}. '
-                'If this is 0, rebuild FasterGSCudaBackend or the scene is empty; '
-                'flat RGB with grey normals usually means zero auxiliary buffers (encoding maps zero normals to 0.5).'
-            )
+            aux = auxiliary_maps.detach()
+            mx = float(aux.abs().max().cpu())
+            if mx < 1e-6:
+                Logger.log_warning(
+                    'Faster2DGS auxiliary_maps are all zero — rebuild FasterGSCudaBackend or check the scene; '
+                    'grey normals usually mean dead aux buffers (zero normals encode to 0.5).'
+                )
+            else:
+                # Channels: alpha [0,1], depth (scene units), depth variance, normal xyz in [-1,1].
+                Logger.log_info(
+                    f'Faster2DGS auxiliary_maps active (abs max={mx:.4g}; depth/normals are not clamped to [0,1]).'
+                )
             Faster2DGSRenderer._aux_stats_logged = True
 
         rend_alpha = auxiliary_maps[0:1].clamp(0.0, 1.0)

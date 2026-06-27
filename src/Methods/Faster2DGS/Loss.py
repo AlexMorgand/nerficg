@@ -4,7 +4,7 @@ import torch
 import torchmetrics
 
 from Framework import ConfigParameterList
-from Methods.FasterGS.Model import Gaussians
+from Methods.FasterGS.Model import FasterGSModel
 from Optim.Losses.Base import BaseLoss
 from Optim.Losses.DSSIM import fused_dssim
 
@@ -12,9 +12,9 @@ from Optim.Losses.DSSIM import fused_dssim
 class Faster2DGSLoss(BaseLoss):
     """Loss container with 2DGS-style geometric regularization hooks."""
 
-    def __init__(self, loss_config: ConfigParameterList, gaussians: Gaussians) -> None:
+    def __init__(self, loss_config: ConfigParameterList, model: FasterGSModel) -> None:
         super().__init__()
-        self._gaussians = gaussians
+        self._gaussians = model.gaussians
         self._render_pkg: dict[str, torch.Tensor] | None = None
         self._base_distortion_weight = float(loss_config.LAMBDA_DISTORTION)
         self._base_normal_weight = float(loss_config.LAMBDA_NORMAL)
@@ -24,8 +24,8 @@ class Faster2DGSLoss(BaseLoss):
         self.add_loss_metric('DISTORTION_REGULARIZATION', self.distortion_regularization_loss, loss_config.LAMBDA_DISTORTION)
         self.add_loss_metric('NORMAL_REGULARIZATION', self.normal_regularization_loss, loss_config.LAMBDA_NORMAL)
         self.add_loss_metric('PLANAR_SPLAT_REGULARIZATION', self.planar_splat_regularization_loss, loss_config.LAMBDA_PLANAR_SPLAT)
-        self.add_loss_metric('OPACITY_REGULARIZATION', gaussians.opacity_regularization_loss, loss_config.LAMBDA_OPACITY_REGULARIZATION)
-        self.add_loss_metric('SCALE_REGULARIZATION', gaussians.scale_regularization_loss, loss_config.LAMBDA_SCALE_REGULARIZATION)
+        self.add_loss_metric('OPACITY_REGULARIZATION', model.gaussians.opacity_regularization_loss, loss_config.LAMBDA_OPACITY_REGULARIZATION)
+        self.add_loss_metric('SCALE_REGULARIZATION', model.gaussians.scale_regularization_loss, loss_config.LAMBDA_SCALE_REGULARIZATION)
         self.add_quality_metric('PSNR', torchmetrics.functional.image.peak_signal_noise_ratio)
 
     def set_geometry_loss_weights(

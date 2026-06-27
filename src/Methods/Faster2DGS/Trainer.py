@@ -4,8 +4,8 @@ import torch
 
 import Framework
 from Datasets.Base import BaseDataset
-from Datasets.utils import apply_background_color, check_external_mask_tensor
-from Methods.Base.utils import training_callback
+from Datasets.utils import apply_background_color, get_supervision_alpha
+from Methods.Base.utils import pre_training_callback, training_callback
 from Methods.Faster2DGS.Loss import Faster2DGSLoss
 from Methods.FasterGS.Trainer import FasterGSTrainer
 
@@ -29,16 +29,19 @@ from Methods.FasterGS.Trainer import FasterGSTrainer
 class Faster2DGSTrainer(FasterGSTrainer):
     """Trainer with 2DGS regularization hooks."""
 
-    def __init__(self, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.loss = Faster2DGSLoss(loss_config=self.LOSS, gaussians=self.model.gaussians)
-
     def _warmup_scale(self, iteration: int, start_iteration: int) -> float:
         if iteration <= start_iteration:
             return 0.0
         if self.GEOMETRY_WARMUP_DURATION <= 0:
             return 1.0
         return min(1.0, (iteration - start_iteration) / float(self.GEOMETRY_WARMUP_DURATION))
+
+    @pre_training_callback(priority=40)
+    @torch.no_grad()
+    def setup_gaussians(self, _, dataset: 'BaseDataset') -> None:
+        """Initialize Gaussians, then attach 2DGS loss (FasterGSTrainer.setup_gaussians creates FasterGSLoss)."""
+        super().setup_gaussians(_, dataset)
+        self.loss = Faster2DGSLoss(loss_config=self.LOSS, model=self.model)
 
     @training_callback(priority=80)
     def training_iteration(self, iteration: int, dataset: 'BaseDataset') -> None:
@@ -52,28 +55,14 @@ class Faster2DGSTrainer(FasterGSTrainer):
             planar_splat_scale=self._warmup_scale(iteration, self.PLANAR_SPLAT_START_ITERATION),
         )
         view = self.train_sampler.get(dataset=dataset)['view']
-        external_mask = None
-        if self.EXTERNAL_MASKS_PATH not in (None, ''):
-            external_mask = view.segmentation
-            if external_mask is None:
-                raise Framework.TrainingError('external masks enabled but current view has no segmentation mask')
-            label = str(getattr(getattr(view, '_rgb', None), 'path', 'unknown'))
-            external_mask = check_external_mask_tensor(external_mask, view.rgb, label)
-        alpha_gt = view.alpha
-        supervision_alpha = alpha_gt
-        if external_mask is not None:
-            supervision_alpha = external_mask if supervision_alpha is None else supervision_alpha * external_mask
-        use_random_bg = self.USE_RANDOM_BACKGROUND_COLOR or (
-            self.RANDOM_BACKGROUND_IF_ALPHA_OR_MASK and supervision_alpha is not None
-        )
-        bg_color = torch.rand_like(view.camera.background_color) if use_random_bg else view.camera.background_color
+        bg_color = torch.rand_like(view.camera.background_color) if self.USE_RANDOM_BACKGROUND_COLOR else view.camera.background_color
         render_pkg = self.renderer.render_image_training(
             view=view,
             update_densification_info=not self.USE_MCMC and iteration < self.DENSIFICATION_END_ITERATION,
             bg_color=bg_color,
         )
         rgb_gt = view.rgb
-        if supervision_alpha is not None:
+        if (supervision_alpha := get_supervision_alpha(view)) is not None:
             rgb_gt = apply_background_color(rgb_gt, supervision_alpha, bg_color)
         loss = self.loss(render_pkg, rgb_gt)
         loss.backward()

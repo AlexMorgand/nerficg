@@ -3,7 +3,18 @@ from glob import glob
 from pathlib import Path
 
 from setuptools import setup
-from torch.utils.cpp_extension import CUDAExtension, BuildExtension
+
+try:
+    from torch.utils.cpp_extension import CUDAExtension, BuildExtension
+except ImportError as exc:
+    raise SystemExit(
+        'Faster2DGSCudaBackend must be built with the same Python environment that has PyTorch installed.\n'
+        'Activate your nerficg training conda/venv, verify with:\n'
+        '  python -c "import torch; print(torch.__version__)"\n'
+        'then reinstall using:\n'
+        '  python -m pip install --no-build-isolation --no-cache-dir ./src/Methods/Faster2DGS/Faster2DGSCudaBackend\n'
+        f'({exc})'
+    ) from exc
 
 __author__ = 'NeRFICG'
 __description__ = 'CUDA backend scaffold for Faster2DGS surfel rasterization.'
@@ -16,6 +27,13 @@ extension_name = module_root.name
 extension_root = module_root / extension_name
 cuda_modules = [d.name for d in Path(extension_root).iterdir() if d.is_dir() and d.name not in ['utils', 'torch_bindings', '__pycache__']]
 fastergs_root = module_root.parent.parent / 'FasterGS' / 'FasterGSCudaBackend' / 'FasterGSCudaBackend'
+fastergs_forward = fastergs_root / 'rasterization' / 'src' / 'forward.cu'
+if not fastergs_forward.is_file():
+    raise SystemExit(
+        'Missing FasterGS CUDA sources required by Faster2DGSCudaBackend.\n'
+        f'Expected file not found: {fastergs_forward}\n'
+        'Ensure src/Methods/FasterGS/FasterGSCudaBackend is present and up to date.'
+    )
 
 sources = [str(extension_root / 'torch_bindings' / 'bindings.cpp')]
 for module in cuda_modules:
