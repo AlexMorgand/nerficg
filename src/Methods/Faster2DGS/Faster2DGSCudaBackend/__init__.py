@@ -12,22 +12,25 @@ __install_command__ = [
 ]
 
 try:
-    # CUDAExtension is installed as top-level Faster2DGSCudaBackend._C (see setup.py), same as
-    # FasterGSCudaBackend — not as Methods....Faster2DGSCudaBackend._C, so never use "from . import _C".
     from Faster2DGSCudaBackend import _C as _backend  # noqa: F401
-except ImportError as e:
-    raise Framework.ExtensionError(name=__extension_name__, install_command=__install_command__) from e
+    _HAS_LEGACY_SURFEL_EXTENSION = True
+except ImportError:
+    _HAS_LEGACY_SURFEL_EXTENSION = False
 
 from .surfel_rasterization import (
     SurfelRasterizerSettings,
+    configure_backend,
     diff_rasterize_surfel_with_aux,
     rasterize_surfel_with_aux,
     has_true_surfel_backend,
+    has_native_diff_surfel_backend,
 )
 
 __all__ = [
     'SurfelRasterizerSettings',
+    'configure_backend',
     'diff_rasterize_surfel_with_aux',
     'rasterize_surfel_with_aux',
     'has_true_surfel_backend',
+    'has_native_diff_surfel_backend',
 ]

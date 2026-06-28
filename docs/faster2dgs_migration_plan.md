@@ -61,6 +61,8 @@ Acceptance:
    - Clone/split logic adapted for 2D scales.
    - No FastGS-specific 3D filter assumptions.
 
+**Status (implemented):** `Gaussians2D` stores `(N, 2)` log-scales; 2D-aware densification; PLY exports `scale_0/scale_1`; legacy `(N, 3)` checkpoints load by keeping XY only. Rasterization still uses the Phase A surfel bridge (Phase C).
+
 Acceptance:
 - Training loop runs for 100+ iterations with `METHOD_TYPE=Faster2DGS` and no shape hacks.
 
@@ -68,11 +70,13 @@ Acceptance:
 1. Update `src/Methods/Faster2DGS/Renderer.py` to call new backend only.
 2. Remove legacy fallback that interprets FastGS aux as surfel output.
 3. Standardize aux channel layout (fixed contract):
-   - `aux[0]`: expected depth numerator or mean depth (document explicitly)
+   - `aux[0]`: expected depth numerator
    - `aux[1]`: alpha
-   - `aux[2:5]`: rendered normal (view/world convention documented)
-   - `aux[5]`: median depth (optional)
+   - `aux[2:5]`: rendered normal (view space → world in renderer)
+   - `aux[5]`: median depth
    - `aux[6]`: distortion
+
+**Status (implemented):** Official `diff-surfel-rasterization` submodule + `DiffSurfelBackend` adapter; `USE_DIFF_SURFEL_BACKEND=True` (default in `gs_guitar.yaml`); 7-ch allmap parsing; `DEPTH_RATIO` for mesh/training depth; analytic aux backward via diff-surfel. Legacy `Faster2DGSCudaBackend` bridge remains as fallback when `USE_DIFF_SURFEL_BACKEND=False`.
 
 Acceptance:
 - `render_image_inference` returns non-degenerate `rgb/depth/alpha/normal` on trained checkpoint.
@@ -83,10 +87,12 @@ Acceptance:
    - normal consistency
    - distortion
 2. Add phased terms:
-   - depth smoothness
-   - surface compactness
-   - multi-view consistency
+   - depth smoothness (edge-aware on `surf_depth`, optional `LAMBDA_DEPTH_SMOOTHNESS`)
+   - surface compactness (via distortion loss `L_d` — paper α=100/1000)
+   - multi-view consistency (not yet)
 3. Ensure these terms flow through analytic aux backward.
+
+**Status (implemented):** Normal + distortion match 2DGS `train.py`; iter gates 3k/7k; geometry loss console log every `GEOMETRY_LOG_INTERVAL`; depth smoothness (Phase D); configs use paper α (100 garden / 1000 guitar) + `LAMBDA_NORMAL=0.05`.
 
 Acceptance:
 - Loss terms are non-zero where expected and decrease during training.
@@ -96,6 +102,33 @@ Acceptance:
 2. Mark viewer limitations:
    - Existing 3DGS-style viewers may still display ellipsoids from exported PLY.
 3. Add optional 2DGS-aware export path/comments and viewer notes.
+
+**Status (partial):** Mesh export works; viewer still 3DGS-style ellipsoids from PLY.
+
+
+## Phase F - MipNeRF360 paper parity benchmark
+
+Configs (outdoor `DEPTH_RATIO=0`, `LAMBDA_DISTORTION=100`, `images_4` / factor 0.25;
+indoor kitchen: `DEPTH_RATIO=1`, `LAMBDA_DISTORTION=1000`, `images_2` / factor 0.5):
+
+| Scene | Config | Paper PSNR |
+|-------|--------|------------|
+| bicycle | `configs/gs_bicycle_2DGS.yaml` | 24.87 |
+| stump | `configs/gs_stump_2DGS.yaml` | 26.47 |
+| kitchen | `configs/gs_kitchen_2DGS.yaml` | 30.50 |
+| garden | `configs/gs_garden_2DGS.yaml` | 26.95 |
+
+Run all four sequentially:
+
+```bash
+python scripts/run_mip360_2dgs_benchmark.py
+```
+
+FastGS speed path retained: `FusedAdam`, `fused_dssim`, Morton reordering (5k),
+`expandable_segments`, `PRELOADING_LEVEL=1`, diff-surfel rasterizer (same kernel as official 2DGS).
+
+2DGS parity fixes: official viewspace grad for densify (no pixel scale), opacity cull 0.05,
+screen-size prune, no final opacity prune, official diff-surfel backend.
 
 
 ## 3) Tensor Contracts to Lock Before Coding

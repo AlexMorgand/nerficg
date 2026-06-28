@@ -1,3 +1,6 @@
 [submodule "src/ICGui"]
 	path = src/ICGui
 	url = ../../nerficg-project/icgui
+[submodule "submodules/diff-surfel-rasterization"]
+	path = submodules/diff-surfel-rasterization
+	url = https://github.com/hbb1/diff-surfel-rasterization.git

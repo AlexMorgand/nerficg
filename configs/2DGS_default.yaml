@@ -1,5 +1,17 @@
-# Faster2DGS on COLMAP guitar scene — surfel/aux buffers + 2DGS-style regularizers.
-# Requires FasterGS CUDA (diff_rasterize_with_aux) and optionally Faster2DGSCudaBackend for USE_SURFEL_BACKEND_API.
+# NeRFICG Faster2DGS — default template aligned with hbb1/2d-gaussian-splatting.
+#
+# Usage:
+#   cp configs/2DGS_default.yaml configs/my_scene.yaml
+#   # edit DATASET.PATH, MODEL_NAME, DATASET_TYPE, and scene preset below
+#   python scripts/train.py -c configs/my_scene.yaml
+#
+# Requires diff-surfel (Phase C):
+#   pip install ./submodules/diff-surfel-rasterization --no-build-isolation
+#
+# Scene presets (2DGS paper / README):
+#   Unbounded (MipNeRF360 outdoor):  DATASET_TYPE: MipNeRF360, DEPTH_RATIO: 0.0, LAMBDA_DISTORTION: 100
+#   Bounded (DTU / COLMAP object):   DATASET_TYPE: Colmap,       DEPTH_RATIO: 1.0, LAMBDA_DISTORTION: 1000
+# If RGB blurs with distortion on, reduce LAMBDA_DISTORTION or set to 0 (official code default).
 
 GLOBAL:
     LOG_LEVEL: 2
@@ -9,6 +21,7 @@ GLOBAL:
     ANOMALY_DETECTION: false
     FILTER_WARNINGS: true
     METHOD_TYPE: Faster2DGS
+    # Colmap | MipNeRF360 | NeRF | ...
     DATASET_TYPE: Colmap
 
 MODEL:
@@ -18,16 +31,19 @@ RENDERER:
     SCALE_MODIFIER: 1.0
     PROPER_ANTIALIASING: false
     FORCE_OPTIMIZED_INFERENCE: false
-    # Faster2DGSRenderer — surfel path uses Faster2DGSCudaBackend; set false to use FasterGS diff_rasterize_with_aux only.
     REQUIRE_TRUE_2DGS_KERNEL: false
     USE_SURFEL_BACKEND_API: true
     USE_DIFF_SURFEL_BACKEND: true
+    # 0 = mean depth (outdoor / unbounded), 1 = median depth (bounded / mesh export)
     DEPTH_RATIO: 1.0
     Z_LOG_SCALE_COMPAT: -6.0
+    # GUI debug: extra "splats" output (uniform opacity); enable in Advanced → Include Splat Debug
+    INCLUDE_SPLAT_DEBUG: false
+    SPLAT_DEBUG_UNIFORM_OPACITY: 1.0
 
 TRAINING:
     LOAD_CHECKPOINT: null
-    MODEL_NAME: guitar_faster2dgs
+    MODEL_NAME: faster2dgs_scene
     NUM_ITERATIONS: 30_000
     RUN_VALIDATION: false
     DATA:
@@ -44,46 +60,29 @@ TRAINING:
         VISUALIZE_ERRORS: false
         INTERVAL: -1
         TRAINING_STATE: false
-    TIMING:
-        ACTIVATE: false
-        INCLUDE_DATALOADING_IN_TOTAL: true
-        INCLUDE_PRETRAINING_IN_TOTAL: true
-        INCLUDE_POSTTRAINING_IN_TOTAL: false
     WANDB:
         ACTIVATE: false
-        ENTITY: null
-        PROJECT: nerficg
-        LOG_IMAGES: true
-        INDEX_VALIDATION: -1
-        INDEX_TRAINING: -1
-        INTERVAL: 1000
-        SWEEP_MODE:
-            ACTIVE: false
-            START_ITERATION: 999
-            ITERATION_STRIDE: 1000
-            NUM_IMAGES: -1
-    WRITE_VRAM_STATS: false
     GUI:
-        ACTIVATE: true
+        ACTIVATE: false
         RENDER_INTERVAL: 5
         GUI_STATUS_ENABLED: true
         GUI_STATUS_INTERVAL: 20
-        SKIP_GUI_SETUP: false
+        SKIP_GUI_SETUP: true
         FPS_ROLLING_AVERAGE_SIZE: 100
 
-    DENSIFICATION_START_ITERATION: 600
-    DENSIFICATION_END_ITERATION: 8_000 #14_900
-    DENSIFICATION_INTERVAL: 200 #100
-    DENSIFICATION_GRAD_THRESHOLD: 0.0004 #0.0002
+    # Official 2DGS OptimizationParams + train.py geometry schedule
+    DENSIFICATION_START_ITERATION: 500
+    DENSIFICATION_END_ITERATION: 15_000
+    DENSIFICATION_INTERVAL: 100
+    DENSIFICATION_GRAD_THRESHOLD: 0.0002
+    DENSIFICATION_PERCENT_DENSE: 0.01
     DISTORTION_START_ITERATION: 3_000
     NORMAL_START_ITERATION: 7_000
     DEPTH_SMOOTHNESS_START_ITERATION: 7_000
     PLANAR_SPLAT_START_ITERATION: 7_000
-    GEOMETRY_WARMUP_DURATION: 2_000
+    GEOMETRY_WARMUP_DURATION: 0
     GEOMETRY_LOG_INTERVAL: 10
-    DENSIFICATION_PERCENT_DENSE: 0.01
     USE_MCMC: false
-    MAX_PRIMITIVES: 1_000_000
     OPACITY_RESET_INTERVAL: 3_000
     EXTRA_OPACITY_RESET_ITERATION: 500
     MORTON_ORDERING_INTERVAL: 5_000
@@ -93,10 +92,10 @@ TRAINING:
         ORIGINAL_FORMULATION: false
         FILTER_VARIANCE: 0.2
     USE_RANDOM_BACKGROUND_COLOR: false
-    RANDOM_BACKGROUND_IF_ALPHA_OR_MASK: false
+    RANDOM_BACKGROUND_IF_ALPHA_OR_MASK: true
     EXTERNAL_MASKS_PATH: null
     NORMALIZE_LOSS_BY_MASK_AREA: true
-    MIN_OPACITY_AFTER_TRAINING: 0.00392156862745098
+    MIN_OPACITY_AFTER_TRAINING: 0.05
     RANDOM_INITIALIZATION:
         FORCE: false
         N_POINTS: 100_000
@@ -104,14 +103,16 @@ TRAINING:
         CARVING_IN_ALL_FRUSTUMS: false
         CARVING_ENFORCE_ALPHA: false
 
-    # 2DGS paper: α=1000 bounded / β=0.05; tune α down if surfaces over-smooth.
     LOSS:
         LAMBDA_L1: 0.8
         LAMBDA_DSSIM: 0.2
+        # Paper α (distortion): 1000 bounded, 100 unbounded; code default 0
         LAMBDA_DISTORTION: 1000.0
+        # Paper β (normal consistency)
         LAMBDA_NORMAL: 0.05
+        # NeRFICG Phase D optional; 0 to disable
         LAMBDA_DEPTH_SMOOTHNESS: 0.01
-        LAMBDA_PLANAR_SPLAT: 0.
+        LAMBDA_PLANAR_SPLAT: 0.0
         LAMBDA_OPACITY_REGULARIZATION: 0.0
         LAMBDA_SCALE_REGULARIZATION: 0.0
 
@@ -126,8 +127,8 @@ TRAINING:
         LEARNING_RATE_ROTATIONS: 0.001
 
 DATASET:
-    PATH: /home/alex/Simulon/data/Simulon_scene/guitar/colmap/undistort/
-    IMAGE_SCALE_FACTOR: 0.25
+    PATH: dataset/your_scene
+    IMAGE_SCALE_FACTOR: 1.0
     NORMALIZE_CUBE: null
     NORMALIZE_RECENTER: false
     BACKGROUND_COLOR:
