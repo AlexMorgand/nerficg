@@ -1,0 +1,85 @@
+GLOBAL:
+    LOG_LEVEL: 2
+    GPU_INDICES:
+    - 0
+    RANDOM_SEED: 0
+    ANOMALY_DETECTION: false
+    FILTER_WARNINGS: true
+    METHOD_TYPE: Faster2DGS
+    DATASET_TYPE: Colmap
+MODEL:
+    SH_DEGREE: 3
+
+RENDERER:
+    USE_FUSED_COVARIANCE_COMPUTATION: true
+    USE_FUSED_SH_CONVERSION: true
+    SCALE_MODIFIER: 1.0
+    PROPER_ANTIALIASING: false
+    FORCE_OPTIMIZED_INFERENCE: false
+    REQUIRE_TRUE_2DGS_KERNEL: false
+    DEPTH_RATIO: 0.0
+
+TRAINING:
+    LOAD_CHECKPOINT: null
+    MODEL_NAME: livingroom_alex_2DGS
+    NUM_ITERATIONS: 30_000
+    RUN_VALIDATION: false
+    DATA:
+        PRELOADING_LEVEL: 1
+        FIELDS: ['rgb', 'alpha']
+        PRECOMPUTE_RAYS: false
+        RAYS_TO_DEVICE: false
+    BACKUP:
+        FINAL_CHECKPOINT: true
+        RENDER_TESTSET: true
+        RENDER_TRAINSET: false
+        RENDER_VALSET: false
+        INTERMEDIATE_RENDERINGS: true
+        VISUALIZE_ERRORS: false
+        INTERVAL: -1
+        TRAINING_STATE: false
+    TIMING:
+        ACTIVATE: false
+        INCLUDE_DATALOADING_IN_TOTAL: true
+        INCLUDE_PRETRAINING_IN_TOTAL: true
+        INCLUDE_POSTTRAINING_IN_TOTAL: false
+    WANDB:
+        ACTIVATE: false
+        ENTITY: null
+        PROJECT: nerficg
+        LOG_IMAGES: true
+        INDEX_VALIDATION: -1
+        INDEX_TRAINING: -1
+        INTERVAL: 1000
+        SWEEP_MODE:
+            ACTIVE: false
+            START_ITERATION: 999
+            ITERATION_STRIDE: 1000
+            NUM_IMAGES: -1
+    WRITE_VRAM_STATS: false
+    GUI:
+        ACTIVATE: true
+        RENDER_INTERVAL: 5
+        SKIP_GUI_SETUP: true
+
+    DENSIFICATION_START_ITERATION: 500
+    DENSIFICATION_END_ITERATION: 15_000
+    DENSIFICATION_INTERVAL: 100
+    DENSIFY_GRAD_THRESHOLD: 0.0002
+    LOSS:
+        LAMBDA_L1: 0.8
+        LAMBDA_DSSIM: 0.2
+DATASET:
+    PATH: /home/alex/Simulon/data/Simulon_scene/Living_room_gameboy_fender/Take2/results/livingroom_take2
+    IMAGE_SCALE_FACTOR: 0.25
+    NORMALIZE_CUBE: null
+    NORMALIZE_RECENTER: false
+    BACKGROUND_COLOR:
+        - 0.0
+        - 0.0
+        - 0.0
+    NEAR_PLANE: 0.01
+    FAR_PLANE: 100.0
+    TEST_STEP: 8
+    APPLY_PCA: true
+    APPLY_PCA_RESCALE: false

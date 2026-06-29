@@ -32,6 +32,6 @@ class Faster2DGSModel(FasterGSModel):
         if not data:
             return data
         comments = list(data.get('comments', []))
-        comments.append('Note: Faster2DGS Gaussians2D — 2D log-scales (scale_0, scale_1); surfel bridge rasterizer.')
+        comments.append('Note: Faster2DGS Gaussians2D — 2D log-scales (scale_0, scale_1); native surfel rasterizer.')
         data['comments'] = comments
         return data

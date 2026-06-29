@@ -4,10 +4,8 @@
 import utils
 
 with utils.DiscoverSourcePath():
-    import torch
     import Framework
     from Implementations import Methods as MI, Datasets as DI
-    from Methods.Faster2DGS.Faster2DGSCudaBackend import configure_backend
 
 
 def main() -> None:
@@ -15,7 +13,6 @@ def main() -> None:
     Framework.config.TRAINING.NUM_ITERATIONS = 650
     Framework.config.TRAINING.GUI.ACTIVATE = False
     Framework.config.TRAINING.DATA.PRELOADING_LEVEL = 1
-    configure_backend(use_diff_surfel=Framework.config.RENDERER.USE_DIFF_SURFEL_BACKEND)
 
     dataset = DI.get_dataset(Framework.config.GLOBAL.DATASET_TYPE, Framework.config.DATASET.PATH)
     trainer = MI.get_training_instance(Framework.config.GLOBAL.METHOD_TYPE, None)

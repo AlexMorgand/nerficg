@@ -16,7 +16,7 @@ except ImportError as exc:
     ) from exc
 
 __author__ = 'NeRFICG'
-__description__ = 'Native 2DGS surfel rasterization CUDA backend for Faster2DGS.'
+__description__ = 'Native Faster2DGS surfel rasterization CUDA backend.'
 
 ENABLE_FASTMATH = True
 ENABLE_NVCC_LINEINFO = False
@@ -25,13 +25,11 @@ module_root = Path(__file__).parent.absolute()
 extension_name = module_root.name
 extension_root = module_root / extension_name
 surfel_root = extension_root / 'surfel_rasterization'
-repo_root = module_root.parents[3]
-glm_root = repo_root / 'submodules' / 'diff-surfel-rasterization' / 'third_party' / 'glm'
+glm_root = module_root / 'third_party' / 'glm'
 if not (glm_root / 'glm' / 'glm.hpp').is_file():
     raise SystemExit(
         'GLM headers not found for Faster2DGSCudaBackend surfel build.\n'
-        f'Expected: {glm_root / "glm" / "glm.hpp"}\n'
-        'Run: git submodule update --init submodules/diff-surfel-rasterization/third_party/glm'
+        f'Expected: {glm_root / "glm" / "glm.hpp"}'
     )
 
 sources = [

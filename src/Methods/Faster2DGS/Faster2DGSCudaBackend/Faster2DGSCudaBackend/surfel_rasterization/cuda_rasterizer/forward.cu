@@ -1,12 +1,7 @@
 /*
- * Copyright (C) 2023, Inria
- * GRAPHDECO research group, https://team.inria.fr/graphdeco
- * All rights reserved.
- *
- * This software is free for non-commercial, research and evaluation use 
- * under the terms of the LICENSE.md file.
- *
- * For inquiries contact  george.drettakis@inria.fr
+ * Faster2DGS native surfel rasterizer (NeRFICG).
+ * Bucket-checkpoint orchestration from FastGS; surfel forward/backward implements
+ * the 2D Gaussian Splatting perspective-disk formulation.
  */
 
 #include "forward.h"
@@ -251,8 +246,10 @@ __global__ void preprocessCUDA(int P, int D, int M,
 }
 
 // Main rasterization method. Collaboratively works on one tile per
-// block, each thread treats one pixel. Alternates between fetching 
-// and rasterizing data.
+// block, each thread treats one pixel. Surfel ray-splat intersection +
+// 7-channel aux, with FastGS-style per-bucket (32 primitive) checkpoints
+// of the running accumulators (color, T, depth, normal, M1, M2) so the
+// backward can be done bucket-parallel instead of per-tile serial.
 template <uint32_t CHANNELS>
 __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
 renderCUDA(
@@ -265,8 +262,17 @@ renderCUDA(
 	const float* __restrict__ transMats,
 	const float* __restrict__ depths,
 	const float4* __restrict__ normal_opacity,
+	const uint32_t* __restrict__ tile_bucket_offsets,
 	float* __restrict__ final_T,
+	float* __restrict__ final_M1,
+	float* __restrict__ final_M2,
 	uint32_t* __restrict__ n_contrib,
+	uint32_t* __restrict__ median_contrib,
+	uint32_t* __restrict__ max_contrib,
+	uint32_t* __restrict__ bucket_tile_index,
+	float4* __restrict__ bucket_color_T,
+	float4* __restrict__ bucket_aux_dn,
+	float2* __restrict__ bucket_aux_m,
 	const float* __restrict__ bg_color,
 	float* __restrict__ out_color,
 	float* __restrict__ out_others)
@@ -275,10 +281,12 @@ renderCUDA(
 	auto block = cg::this_thread_block();
 	uint32_t horizontal_blocks = (W + BLOCK_X - 1) / BLOCK_X;
 	uint2 pix_min = { block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y };
-	uint2 pix_max = { min(pix_min.x + BLOCK_X, W), min(pix_min.y + BLOCK_Y , H) };
 	uint2 pix = { pix_min.x + block.thread_index().x, pix_min.y + block.thread_index().y };
 	uint32_t pix_id = W * pix.y + pix.x;
 	float2 pixf = { (float)pix.x, (float)pix.y};
+	const uint32_t thread_rank = block.thread_rank();
+	const uint32_t tile_id = block.group_index().y * horizontal_blocks + block.group_index().x;
+	const uint32_t n_pixels = (uint32_t)W * (uint32_t)H;
 
 	// Check if this thread is associated with a valid pixel or outside.
 	bool inside = pix.x < W&& pix.y < H;
@@ -286,9 +294,16 @@ renderCUDA(
 	bool done = !inside;
 
 	// Load start/end range of IDs to process in bit sorted list.
-	uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
-	const int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
-	int toDo = range.y - range.x;
+	uint2 range = ranges[tile_id];
+	const int n_points_total = range.y - range.x;
+	const int rounds = ((n_points_total + BLOCK_SIZE - 1) / BLOCK_SIZE);
+	int toDo = n_points_total;
+
+	// Bucket bookkeeping: first global bucket of this tile (exclusive prefix).
+	const int n_buckets_tile = (n_points_total + SURFEL_BUCKET_SIZE - 1) / SURFEL_BUCKET_SIZE;
+	uint32_t bucket_offset = (tile_id == 0) ? 0u : tile_bucket_offsets[tile_id - 1];
+	for (int rem = n_buckets_tile, cur = thread_rank; rem > 0; rem -= BLOCK_SIZE, cur += BLOCK_SIZE)
+		if (cur < n_buckets_tile) bucket_tile_index[bucket_offset + cur] = tile_id;
 
 	// Allocate storage for batches of collectively fetched data.
 	__shared__ int collected_id[BLOCK_SIZE];
@@ -304,19 +319,18 @@ renderCUDA(
 	uint32_t last_contributor = 0;
 	float C[CHANNELS] = { 0 };
 
-
 #if RENDER_AXUTILITY
-	// render axutility ouput
 	float N[3] = {0};
 	float D = { 0 };
 	float M1 = {0};
 	float M2 = {0};
 	float distortion = {0};
 	float median_depth = {0};
-	// float median_weight = {0};
-	float median_contributor = {-1};
-
+	uint32_t median_contributor = 0; // 0 = none; otherwise 1-based contributor index
 #endif
+
+	// running count of primitives this pixel-thread has stepped through (for bucket checkpoint)
+	uint32_t bucket_count = 0;
 
 	// Iterate over batches until all done or range is complete
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
@@ -327,22 +341,34 @@ renderCUDA(
 			break;
 
 		// Collectively fetch per-Gaussian data from global to shared
-		int progress = i * BLOCK_SIZE + block.thread_rank();
+		int progress = i * BLOCK_SIZE + thread_rank;
 		if (range.x + progress < range.y)
 		{
 			int coll_id = point_list[range.x + progress];
-			collected_id[block.thread_rank()] = coll_id;
-			collected_xy[block.thread_rank()] = points_xy_image[coll_id];
-			collected_normal_opacity[block.thread_rank()] = normal_opacity[coll_id];
-			collected_Tu[block.thread_rank()] = {transMats[9 * coll_id+0], transMats[9 * coll_id+1], transMats[9 * coll_id+2]};
-			collected_Tv[block.thread_rank()] = {transMats[9 * coll_id+3], transMats[9 * coll_id+4], transMats[9 * coll_id+5]};
-			collected_Tw[block.thread_rank()] = {transMats[9 * coll_id+6], transMats[9 * coll_id+7], transMats[9 * coll_id+8]};
+			collected_id[thread_rank] = coll_id;
+			collected_xy[thread_rank] = points_xy_image[coll_id];
+			collected_normal_opacity[thread_rank] = normal_opacity[coll_id];
+			collected_Tu[thread_rank] = {transMats[9 * coll_id+0], transMats[9 * coll_id+1], transMats[9 * coll_id+2]};
+			collected_Tv[thread_rank] = {transMats[9 * coll_id+3], transMats[9 * coll_id+4], transMats[9 * coll_id+5]};
+			collected_Tw[thread_rank] = {transMats[9 * coll_id+6], transMats[9 * coll_id+7], transMats[9 * coll_id+8]};
 		}
 		block.sync();
 
 		// Iterate over current batch
 		for (int j = 0; !done && j < min(BLOCK_SIZE, toDo); j++)
 		{
+			// Checkpoint running accumulators every SURFEL_BUCKET_SIZE primitives
+			// (BEFORE blending this primitive), matching the bucket boundaries.
+			if (bucket_count % SURFEL_BUCKET_SIZE == 0)
+			{
+				const uint32_t slot = bucket_offset * BLOCK_SIZE + thread_rank;
+				bucket_color_T[slot] = make_float4(C[0], C[1], C[2], T);
+				bucket_aux_dn[slot] = make_float4(D, N[0], N[1], N[2]);
+				bucket_aux_m[slot] = make_float2(M1, M2);
+				bucket_offset++;
+			}
+			bucket_count++;
+
 			// Keep track of current position in range
 			contributor++;
 
@@ -351,24 +377,18 @@ renderCUDA(
 			const float3 Tu = collected_Tu[j];
 			const float3 Tv = collected_Tv[j];
 			const float3 Tw = collected_Tw[j];
-			// Transform the two planes into local u-v system. 
 			float3 k = pix.x * Tw - Tu;
 			float3 l = pix.y * Tw - Tv;
-			// Cross product of two planes is a line, Eq. (9)
 			float3 p = cross(k, l);
 			if (p.z == 0.0) continue;
-			// Perspective division to get the intersection (u,v), Eq. (10)
 			float2 s = {p.x / p.z, p.y / p.z};
-			float rho3d = (s.x * s.x + s.y * s.y); 
-			// Add low pass filter
+			float rho3d = (s.x * s.x + s.y * s.y);
 			float2 d = {xy.x - pixf.x, xy.y - pixf.y};
-			float rho2d = FilterInvSquare * (d.x * d.x + d.y * d.y); 
+			float rho2d = FilterInvSquare * (d.x * d.x + d.y * d.y);
 			float rho = min(rho3d, rho2d);
 
 			// compute depth
 			float depth = (s.x * Tw.x + s.y * Tw.y) + Tw.z;
-			// if a point is too small, its depth is not reliable?
-			// depth = (rho3d <= rho2d) ? depth : Tw.z 
 			if (depth < near_n) continue;
 
 			float4 nor_o = collected_normal_opacity[j];
@@ -379,10 +399,6 @@ renderCUDA(
 			if (power > 0.0f)
 				continue;
 
-			// Eq. (2) from 3D Gaussian splatting paper.
-			// Obtain alpha by multiplying with Gaussian opacity
-			// and its exponential falloff from mean.
-			// Avoid numerical instabilities (see paper appendix). 
 			float alpha = min(0.99f, opa * exp(power));
 			if (alpha < 1.0f / 255.0f)
 				continue;
@@ -395,8 +411,6 @@ renderCUDA(
 
 			float w = alpha * T;
 #if RENDER_AXUTILITY
-			// Render depth distortion map
-			// Efficient implementation of distortion loss, see 2DGS' paper appendix.
 			float A = 1-T;
 			float m = far_n / (far_n - near_n) * (1 - near_n / depth);
 			distortion += (m * m * A + M2 - 2 * m * M1) * w;
@@ -406,43 +420,43 @@ renderCUDA(
 
 			if (T > 0.5) {
 				median_depth = depth;
-				// median_weight = w;
-				median_contributor = contributor;
+				median_contributor = contributor; // 1-based
 			}
-			// Render normal map
 			for (int ch=0; ch<3; ch++) N[ch] += normal[ch] * w;
 #endif
 
-			// Eq. (3) from 3D Gaussian splatting paper.
 			for (int ch = 0; ch < CHANNELS; ch++)
 				C[ch] += features[collected_id[j] * CHANNELS + ch] * w;
 			T = test_T;
 
-			// Keep track of last range entry to update this
-			// pixel.
 			last_contributor = contributor;
 		}
 	}
 
-	// All threads that treat valid pixel write out their final
-	// rendering data to the frame and auxiliary buffers.
+	// Per-tile max contributor (bound for bucket-parallel backward launch)
+	__shared__ uint32_t sh_max_contrib;
+	if (thread_rank == 0) sh_max_contrib = 0;
+	block.sync();
+	atomicMax(&sh_max_contrib, last_contributor);
+	block.sync();
+	if (thread_rank == 0) max_contrib[tile_id] = sh_max_contrib;
+
 	if (inside)
 	{
 		final_T[pix_id] = T;
+		final_M1[pix_id] = M1;
+		final_M2[pix_id] = M2;
 		n_contrib[pix_id] = last_contributor;
 		for (int ch = 0; ch < CHANNELS; ch++)
-			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
+			out_color[ch * n_pixels + pix_id] = C[ch] + T * bg_color[ch];
 
 #if RENDER_AXUTILITY
-		n_contrib[pix_id + H * W] = median_contributor;
-		final_T[pix_id + H * W] = M1;
-		final_T[pix_id + 2 * H * W] = M2;
-		out_others[pix_id + DEPTH_OFFSET * H * W] = D;
-		out_others[pix_id + ALPHA_OFFSET * H * W] = 1 - T;
-		for (int ch=0; ch<3; ch++) out_others[pix_id + (NORMAL_OFFSET+ch) * H * W] = N[ch];
-		out_others[pix_id + MIDDEPTH_OFFSET * H * W] = median_depth;
-		out_others[pix_id + DISTORTION_OFFSET * H * W] = distortion;
-		// out_others[pix_id + MEDIAN_WEIGHT_OFFSET * H * W] = median_weight;
+		median_contrib[pix_id] = median_contributor;
+		out_others[pix_id + DEPTH_OFFSET * n_pixels] = D;
+		out_others[pix_id + ALPHA_OFFSET * n_pixels] = 1 - T;
+		for (int ch=0; ch<3; ch++) out_others[pix_id + (NORMAL_OFFSET+ch) * n_pixels] = N[ch];
+		out_others[pix_id + MIDDEPTH_OFFSET * n_pixels] = median_depth;
+		out_others[pix_id + DISTORTION_OFFSET * n_pixels] = distortion;
 #endif
 	}
 }
@@ -458,8 +472,17 @@ void FORWARD::render(
 	const float* transMats,
 	const float* depths,
 	const float4* normal_opacity,
+	const uint32_t* tile_bucket_offsets,
 	float* final_T,
+	float* final_M1,
+	float* final_M2,
 	uint32_t* n_contrib,
+	uint32_t* median_contrib,
+	uint32_t* max_contrib,
+	uint32_t* bucket_tile_index,
+	float4* bucket_color_T,
+	float4* bucket_aux_dn,
+	float2* bucket_aux_m,
 	const float* bg_color,
 	float* out_color,
 	float* out_others)
@@ -474,8 +497,17 @@ void FORWARD::render(
 		transMats,
 		depths,
 		normal_opacity,
+		tile_bucket_offsets,
 		final_T,
+		final_M1,
+		final_M2,
 		n_contrib,
+		median_contrib,
+		max_contrib,
+		bucket_tile_index,
+		bucket_color_T,
+		bucket_aux_dn,
+		bucket_aux_m,
 		bg_color,
 		out_color,
 		out_others);

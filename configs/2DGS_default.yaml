@@ -5,8 +5,7 @@
 #   # edit DATASET.PATH, MODEL_NAME, DATASET_TYPE, and scene preset below
 #   python scripts/train.py -c configs/my_scene.yaml
 #
-# Requires Faster2DGSCudaBackend (native surfel rasterizer):
-#   python scripts/install.py -m Faster2DGS
+# Requires: python scripts/install.py -m Faster2DGS
 #
 # Scene presets (2DGS paper / README):
 #   Unbounded (MipNeRF360 outdoor):  DATASET_TYPE: MipNeRF360, DEPTH_RATIO: 0.0, LAMBDA_DISTORTION: 100
@@ -32,11 +31,8 @@ RENDERER:
     PROPER_ANTIALIASING: false
     FORCE_OPTIMIZED_INFERENCE: false
     REQUIRE_TRUE_2DGS_KERNEL: false
-    USE_SURFEL_BACKEND_API: true
-    USE_DIFF_SURFEL_BACKEND: false
     # 0 = mean depth (outdoor / unbounded), 1 = median depth (bounded / mesh export)
     DEPTH_RATIO: 1.0
-    Z_LOG_SCALE_COMPAT: -6.0
     # GUI debug: extra "splats" output (uniform opacity); enable in Advanced → Include Splat Debug
     INCLUDE_SPLAT_DEBUG: false
     SPLAT_DEBUG_UNIFORM_OPACITY: 1.0

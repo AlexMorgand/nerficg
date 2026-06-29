@@ -16,24 +16,34 @@ try:
 except ImportError as e:
     raise Framework.ExtensionError(name=__extension_name__, install_command=__install_command__) from e
 
+from .camera_utils import (
+    build_surfel_camera,
+    focal_to_fov,
+    get_projection_matrix,
+    viewspace_normal_to_world,
+)
 from .surfel_rasterization import (
     SurfelRasterizerSettings,
     configure_backend,
     diff_rasterize_surfel_with_aux,
-    rasterize_surfel_with_aux,
-    has_true_surfel_backend,
-    has_native_surfel_backend,
-    has_external_surfel_backend,
     has_native_diff_surfel_backend,
+    has_native_surfel_backend,
+    has_surfel_backend,
+    has_true_surfel_backend,
+    rasterize_surfel_with_aux,
 )
 
 __all__ = [
     'SurfelRasterizerSettings',
+    'build_surfel_camera',
     'configure_backend',
     'diff_rasterize_surfel_with_aux',
-    'rasterize_surfel_with_aux',
-    'has_true_surfel_backend',
-    'has_native_surfel_backend',
-    'has_external_surfel_backend',
+    'focal_to_fov',
+    'get_projection_matrix',
     'has_native_diff_surfel_backend',
+    'has_native_surfel_backend',
+    'has_surfel_backend',
+    'has_true_surfel_backend',
+    'rasterize_surfel_with_aux',
+    'viewspace_normal_to_world',
 ]

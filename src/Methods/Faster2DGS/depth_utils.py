@@ -1,16 +1,16 @@
-"""2DGS-compatible depth → surface normal (from hbb1/2d-gaussian-splatting ``utils/point_utils.py``)."""
+"""Depth → surface normal for 2DGS geometry losses."""
 
 from __future__ import annotations
 
 import torch
 
 from Datasets.utils import View
-from Methods.Faster2DGS.DiffSurfelBackend.camera_utils import build_diff_surfel_camera
+from Methods.Faster2DGS.Faster2DGSCudaBackend.camera_utils import build_surfel_camera
 
 
 def depths_to_points(view: View, depthmap: torch.Tensor) -> torch.Tensor:
     """Unproject depth map to world-space 3D points (2DGS ``depths_to_points``)."""
-    world_view_transform, full_proj_transform, _, _, _ = build_diff_surfel_camera(view)
+    world_view_transform, full_proj_transform, _, _, _ = build_surfel_camera(view)
     c2w = world_view_transform.T.inverse()
     w, h = view.camera.width, view.camera.height
     device = depthmap.device

@@ -1,12 +1,7 @@
 /*
- * Copyright (C) 2023, Inria
- * GRAPHDECO research group, https://team.inria.fr/graphdeco
- * All rights reserved.
- *
- * This software is free for non-commercial, research and evaluation use 
- * under the terms of the LICENSE.md file.
- *
- * For inquiries contact  george.drettakis@inria.fr
+ * Faster2DGS native surfel rasterizer (NeRFICG).
+ * Bucket-checkpoint orchestration from FastGS; surfel forward/backward implements
+ * the 2D Gaussian Splatting perspective-disk formulation.
  */
 
 #include "rasterizer_impl.h"
@@ -137,6 +132,17 @@ __global__ void identifyTileRanges(int L, uint64_t* point_list_keys, uint2* rang
 		ranges[currtile].y = L;
 }
 
+// Number of 32-wide FastGS buckets each tile needs (for load-balanced backward).
+__global__ void computeBucketCount(int n_tiles, const uint2* ranges, uint32_t* tile_n_buckets)
+{
+	auto idx = cg::this_grid().thread_rank();
+	if (idx >= n_tiles)
+		return;
+	const uint2 r = ranges[idx];
+	const uint32_t count = r.y - r.x;
+	tile_n_buckets[idx] = (count + SURFEL_BUCKET_SIZE - 1) / SURFEL_BUCKET_SIZE;
+}
+
 // Mark Gaussians as visible/invisible, based on view frustum testing
 void CudaRasterizer::Rasterizer::markVisible(
 	int P,
@@ -169,28 +175,42 @@ CudaRasterizer::GeometryState CudaRasterizer::GeometryState::fromChunk(char*& ch
 	return geom;
 }
 
-CudaRasterizer::ImageState CudaRasterizer::ImageState::fromChunk(char*& chunk, size_t N)
-{
-	ImageState img;
-	obtain(chunk, img.accum_alpha, N * 3, 128);
-	obtain(chunk, img.n_contrib, N * 2, 128);
-	obtain(chunk, img.ranges, N, 128);
-	return img;
-}
-
-CudaRasterizer::BinningState CudaRasterizer::BinningState::fromChunk(char*& chunk, size_t P)
+CudaRasterizer::BinningState CudaRasterizer::BinningState::fromChunk(char*& chunk, size_t num_rendered, int n_tiles, int N)
 {
 	BinningState binning;
-	obtain(chunk, binning.point_list, P, 128);
-	obtain(chunk, binning.point_list_unsorted, P, 128);
-	obtain(chunk, binning.point_list_keys, P, 128);
-	obtain(chunk, binning.point_list_keys_unsorted, P, 128);
+	obtain(chunk, binning.point_list, num_rendered, 128);
+	obtain(chunk, binning.point_list_unsorted, num_rendered, 128);
+	obtain(chunk, binning.point_list_keys, num_rendered, 128);
+	obtain(chunk, binning.point_list_keys_unsorted, num_rendered, 128);
 	cub::DeviceRadixSort::SortPairs(
 		nullptr, binning.sorting_size,
 		binning.point_list_keys_unsorted, binning.point_list_keys,
-		binning.point_list_unsorted, binning.point_list, P);
+		binning.point_list_unsorted, binning.point_list, num_rendered);
 	obtain(chunk, binning.list_sorting_space, binning.sorting_size, 128);
+	obtain(chunk, binning.ranges, n_tiles, 128);
+	obtain(chunk, binning.tile_n_buckets, n_tiles, 128);
+	obtain(chunk, binning.tile_bucket_offsets, n_tiles, 128);
+	obtain(chunk, binning.max_contrib, n_tiles, 128);
+	cub::DeviceScan::InclusiveSum(
+		nullptr, binning.bucket_scan_size,
+		binning.tile_n_buckets, binning.tile_bucket_offsets, n_tiles);
+	obtain(chunk, binning.bucket_scan_space, binning.bucket_scan_size, 128);
+	obtain(chunk, binning.final_T, N, 128);
+	obtain(chunk, binning.final_M1, N, 128);
+	obtain(chunk, binning.final_M2, N, 128);
+	obtain(chunk, binning.n_contrib, N, 128);
+	obtain(chunk, binning.median_contrib, N, 128);
 	return binning;
+}
+
+CudaRasterizer::BucketState CudaRasterizer::BucketState::fromChunk(char*& chunk, size_t n_buckets)
+{
+	BucketState bucket;
+	obtain(chunk, bucket.tile_index, n_buckets, 128);
+	obtain(chunk, bucket.color_T, n_buckets * SURFEL_TILE_PIXELS, 128);
+	obtain(chunk, bucket.aux_dn, n_buckets * SURFEL_TILE_PIXELS, 128);
+	obtain(chunk, bucket.aux_m, n_buckets * SURFEL_TILE_PIXELS, 128);
+	return bucket;
 }
 
 // Forward rendering procedure for differentiable rasterization
@@ -234,11 +254,8 @@ int CudaRasterizer::Rasterizer::forward(
 
 	dim3 tile_grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);
 	dim3 block(BLOCK_X, BLOCK_Y, 1);
-
-	// Dynamically resize image-based auxiliary buffers during training
-	size_t img_chunk_size = required<ImageState>(width * height);
-	char* img_chunkptr = imageBuffer(img_chunk_size);
-	ImageState imgState = ImageState::fromChunk(img_chunkptr, width * height);
+	const int n_tiles = tile_grid.x * tile_grid.y;
+	const int N = width * height;
 
 	if (NUM_CHANNELS != 3 && colors_precomp == nullptr)
 	{
@@ -281,9 +298,9 @@ int CudaRasterizer::Rasterizer::forward(
 	int num_rendered;
 	CHECK_CUDA(cudaMemcpy(&num_rendered, geomState.point_offsets + P - 1, sizeof(int), cudaMemcpyDeviceToHost), debug);
 
-	size_t binning_chunk_size = required<BinningState>(num_rendered);
+	size_t binning_chunk_size = required_binning(num_rendered, n_tiles, N);
 	char* binning_chunkptr = binningBuffer(binning_chunk_size);
-	BinningState binningState = BinningState::fromChunk(binning_chunkptr, num_rendered);
+	BinningState binningState = BinningState::fromChunk(binning_chunkptr, num_rendered, n_tiles, N);
 
 	// For each instance to be rendered, produce adequate [ tile | depth ] key 
 	// and corresponding dublicated Gaussian indices to be sorted
@@ -301,29 +318,46 @@ int CudaRasterizer::Rasterizer::forward(
 	int bit = getHigherMsb(tile_grid.x * tile_grid.y);
 
 	// Sort complete list of (duplicated) Gaussian indices by keys
-	CHECK_CUDA(cub::DeviceRadixSort::SortPairs(
-		binningState.list_sorting_space,
-		binningState.sorting_size,
-		binningState.point_list_keys_unsorted, binningState.point_list_keys,
-		binningState.point_list_unsorted, binningState.point_list,
-		num_rendered, 0, 32 + bit), debug)
+	if (num_rendered > 0)
+		CHECK_CUDA(cub::DeviceRadixSort::SortPairs(
+			binningState.list_sorting_space,
+			binningState.sorting_size,
+			binningState.point_list_keys_unsorted, binningState.point_list_keys,
+			binningState.point_list_unsorted, binningState.point_list,
+			num_rendered, 0, 32 + bit), debug)
 
-	CHECK_CUDA(cudaMemset(imgState.ranges, 0, tile_grid.x * tile_grid.y * sizeof(uint2)), debug);
+	CHECK_CUDA(cudaMemset(binningState.ranges, 0, n_tiles * sizeof(uint2)), debug);
 
 	// Identify start and end of per-tile workloads in sorted list
 	if (num_rendered > 0)
 		identifyTileRanges << <(num_rendered + 255) / 256, 256 >> > (
 			num_rendered,
 			binningState.point_list_keys,
-			imgState.ranges);
+			binningState.ranges);
 	CHECK_CUDA(, debug)
+
+	// FastGS-style bucketing: count 32-wide buckets per tile and prefix-sum them
+	// to get the global bucket layout used by the load-balanced backward.
+	computeBucketCount << <(n_tiles + 255) / 256, 256 >> > (
+		n_tiles, binningState.ranges, binningState.tile_n_buckets);
+	CHECK_CUDA(, debug)
+	CHECK_CUDA(cub::DeviceScan::InclusiveSum(
+		binningState.bucket_scan_space, binningState.bucket_scan_size,
+		binningState.tile_n_buckets, binningState.tile_bucket_offsets, n_tiles), debug)
+	int n_buckets = 0;
+	CHECK_CUDA(cudaMemcpy(&n_buckets, binningState.tile_bucket_offsets + n_tiles - 1, sizeof(int), cudaMemcpyDeviceToHost), debug);
+
+	// Allocate per-bucket forward checkpoints in the image buffer.
+	size_t bucket_chunk_size = required_buckets(n_buckets);
+	char* bucket_chunkptr = imageBuffer(bucket_chunk_size);
+	BucketState bucketState = BucketState::fromChunk(bucket_chunkptr, n_buckets);
 
 	// Let each tile blend its range of Gaussians independently in parallel
 	const float* feature_ptr = colors_precomp != nullptr ? colors_precomp : geomState.rgb;
 	const float* transMat_ptr = transMat_precomp != nullptr ? transMat_precomp : geomState.transMat;
 	CHECK_CUDA(FORWARD::render(
 		tile_grid, block,
-		imgState.ranges,
+		binningState.ranges,
 		binningState.point_list,
 		width, height,
 		focal_x, focal_y,
@@ -332,8 +366,17 @@ int CudaRasterizer::Rasterizer::forward(
 		transMat_ptr,
 		geomState.depths,
 		geomState.normal_opacity,
-		imgState.accum_alpha,
-		imgState.n_contrib,
+		binningState.tile_bucket_offsets,
+		binningState.final_T,
+		binningState.final_M1,
+		binningState.final_M2,
+		binningState.n_contrib,
+		binningState.median_contrib,
+		binningState.max_contrib,
+		bucketState.tile_index,
+		bucketState.color_T,
+		bucketState.aux_dn,
+		bucketState.aux_m,
 		background,
 		out_color,
 		out_others), debug)
@@ -362,6 +405,8 @@ void CudaRasterizer::Rasterizer::backward(
 	char* geom_buffer,
 	char* binning_buffer,
 	char* img_buffer,
+	const float* out_color,
+	const float* out_others,
 	const float* dL_dpix,
 	const float* dL_depths,
 	float* dL_dmean2D,
@@ -375,9 +420,16 @@ void CudaRasterizer::Rasterizer::backward(
 	float* dL_drot,
 	bool debug)
 {
+	const dim3 tile_grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);
+	const dim3 block(BLOCK_X, BLOCK_Y, 1);
+	const int n_tiles = tile_grid.x * tile_grid.y;
+	const int N = width * height;
+
 	GeometryState geomState = GeometryState::fromChunk(geom_buffer, P);
-	BinningState binningState = BinningState::fromChunk(binning_buffer, R);
-	ImageState imgState = ImageState::fromChunk(img_buffer, width * height);
+	BinningState binningState = BinningState::fromChunk(binning_buffer, R, n_tiles, N);
+	int n_buckets = 0;
+	CHECK_CUDA(cudaMemcpy(&n_buckets, binningState.tile_bucket_offsets + n_tiles - 1, sizeof(int), cudaMemcpyDeviceToHost), debug);
+	BucketState bucketState = BucketState::fromChunk(img_buffer, n_buckets);
 
 	if (radii == nullptr)
 	{
@@ -387,9 +439,6 @@ void CudaRasterizer::Rasterizer::backward(
 	const float focal_y = height / (2.0f * tan_fovy);
 	const float focal_x = width / (2.0f * tan_fovx);
 
-	const dim3 tile_grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);
-	const dim3 block(BLOCK_X, BLOCK_Y, 1);
-
 	// Compute loss gradients w.r.t. 2D mean position, conic matrix,
 	// opacity and RGB of Gaussians from per-pixel loss gradients.
 	// If we were given precomputed colors and not SHs, use them.
@@ -397,20 +446,30 @@ void CudaRasterizer::Rasterizer::backward(
 	const float* depth_ptr = geomState.depths;
 	const float* transMat_ptr = (transMat_precomp != nullptr) ? transMat_precomp : geomState.transMat;
 	CHECK_CUDA(BACKWARD::render(
-		tile_grid,
-		block,
-		imgState.ranges,
+		n_buckets,
+		binningState.ranges,
 		binningState.point_list,
 		width, height,
 		focal_x, focal_y,
 		background,
 		geomState.means2D,
 		geomState.normal_opacity,
-		color_ptr,
 		transMat_ptr,
+		color_ptr,
 		depth_ptr,
-		imgState.accum_alpha,
-		imgState.n_contrib,
+		out_color,
+		out_others,
+		binningState.final_T,
+		binningState.final_M1,
+		binningState.final_M2,
+		binningState.n_contrib,
+		binningState.median_contrib,
+		binningState.max_contrib,
+		binningState.tile_bucket_offsets,
+		bucketState.tile_index,
+		bucketState.color_T,
+		bucketState.aux_dn,
+		bucketState.aux_m,
 		dL_dpix,
 		dL_depths,
 		dL_dtransMat,

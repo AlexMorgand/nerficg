@@ -19,11 +19,8 @@ RENDERER:
     PROPER_ANTIALIASING: false
     FORCE_OPTIMIZED_INFERENCE: false
     REQUIRE_TRUE_2DGS_KERNEL: false
-    USE_SURFEL_BACKEND_API: true
-    USE_DIFF_SURFEL_BACKEND: false
     # 2DGS README: mean depth (0) for unbounded/large outdoor scenes like MipNeRF360.
     DEPTH_RATIO: 0.0
-    Z_LOG_SCALE_COMPAT: -6.0
 
 TRAINING:
     LOAD_CHECKPOINT: null

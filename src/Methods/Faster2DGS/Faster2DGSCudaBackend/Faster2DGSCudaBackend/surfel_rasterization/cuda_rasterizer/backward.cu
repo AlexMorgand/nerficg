@@ -1,12 +1,7 @@
 /*
- * Copyright (C) 2023, Inria
- * GRAPHDECO research group, https://team.inria.fr/graphdeco
- * All rights reserved.
- *
- * This software is free for non-commercial, research and evaluation use 
- * under the terms of the LICENSE.md file.
- *
- * For inquiries contact  george.drettakis@inria.fr
+ * Faster2DGS native surfel rasterizer (NeRFICG).
+ * Bucket-checkpoint orchestration from FastGS; surfel forward/backward implements
+ * the 2D Gaussian Splatting perspective-disk formulation.
  */
 
 #include "backward.h"
@@ -139,309 +134,373 @@ __device__ void computeColorFromSH(int idx, int deg, int max_coeffs, const glm::
 }
 
 
-// Backward version of the rendering procedure.
+// Backward version of the rendering procedure (FastGS bucket-parallel).
+//
+// One block per bucket, 32 lanes = the 32 (depth-sorted) primitives of that
+// bucket. Each lane accumulates gradients for its primitive over all 256 pixels
+// of the tile, streamed diagonally via warp shuffles. The per-pixel aux suffix
+// sums (color/depth/normal/alpha/distortion contributed by *later* primitives)
+// are reconstructed front-to-back from the forward bucket checkpoints + the final
+// output maps, avoiding the original 2DGS per-tile serial reverse traversal.
 template <uint32_t C>
-__global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
+__global__ void __launch_bounds__(32)
 renderCUDA(
 	const uint2* __restrict__ ranges,
 	const uint32_t* __restrict__ point_list,
 	int W, int H,
-	float focal_x, float focal_y,
 	const float* __restrict__ bg_color,
 	const float2* __restrict__ points_xy_image,
 	const float4* __restrict__ normal_opacity,
 	const float* __restrict__ transMats,
 	const float* __restrict__ colors,
-	const float* __restrict__ depths,
-	const float* __restrict__ final_Ts,
+	const float* __restrict__ out_color,
+	const float* __restrict__ out_others,
+	const float* __restrict__ final_T,
+	const float* __restrict__ final_M1,
+	const float* __restrict__ final_M2,
 	const uint32_t* __restrict__ n_contrib,
+	const uint32_t* __restrict__ median_contrib,
+	const uint32_t* __restrict__ max_contrib,
+	const uint32_t* __restrict__ tile_bucket_offsets,
+	const uint32_t* __restrict__ bucket_tile_index,
+	const float4* __restrict__ bucket_color_T,
+	const float4* __restrict__ bucket_aux_dn,
+	const float2* __restrict__ bucket_aux_m,
 	const float* __restrict__ dL_dpixels,
 	const float* __restrict__ dL_depths,
-	float * __restrict__ dL_dtransMat,
+	float* __restrict__ dL_dtransMat,
 	float3* __restrict__ dL_dmean2D,
 	float* __restrict__ dL_dnormal3D,
 	float* __restrict__ dL_dopacity,
 	float* __restrict__ dL_dcolors)
 {
-	// We rasterize again. Compute necessary block info.
 	auto block = cg::this_thread_block();
+	auto warp = cg::tiled_partition<32>(block);
+	const uint32_t bucket_idx = block.group_index().x;
+	const uint32_t lane = warp.thread_rank();
+
 	const uint32_t horizontal_blocks = (W + BLOCK_X - 1) / BLOCK_X;
-	const uint2 pix_min = { block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y };
-	const uint2 pix_max = { min(pix_min.x + BLOCK_X, W), min(pix_min.y + BLOCK_Y , H) };
-	const uint2 pix = { pix_min.x + block.thread_index().x, pix_min.y + block.thread_index().y };
-	const uint32_t pix_id = W * pix.y + pix.x;
-	const float2 pixf = {(float)pix.x, (float)pix.y};
+	const uint32_t tile_id = bucket_tile_index[bucket_idx];
+	const uint2 range = ranges[tile_id];
+	const int tile_n_primitives = range.y - range.x;
+	const uint32_t tile_first_bucket = (tile_id == 0) ? 0u : tile_bucket_offsets[tile_id - 1];
+	const int tile_bucket_idx = bucket_idx - tile_first_bucket;
+	if (tile_bucket_idx * SURFEL_BUCKET_SIZE >= (int)max_contrib[tile_id]) return;
 
-	const bool inside = pix.x < W&& pix.y < H;
-	const uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
+	const int tile_primitive_idx = tile_bucket_idx * SURFEL_BUCKET_SIZE + lane;
+	const int instance_idx = range.x + tile_primitive_idx;
+	const bool valid_primitive = tile_primitive_idx < tile_n_primitives;
 
-	const int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
+	const uint32_t n_pixels = (uint32_t)W * (uint32_t)H;
+	const float3 background = make_float3(bg_color[0], bg_color[1], bg_color[2]);
 
-	bool done = !inside;
-	int toDo = range.y - range.x;
-
-	__shared__ int collected_id[BLOCK_SIZE];
-	__shared__ float2 collected_xy[BLOCK_SIZE];
-	__shared__ float4 collected_normal_opacity[BLOCK_SIZE];
-	__shared__ float collected_colors[C * BLOCK_SIZE];
-	__shared__ float3 collected_Tu[BLOCK_SIZE];
-	__shared__ float3 collected_Tv[BLOCK_SIZE];
-	__shared__ float3 collected_Tw[BLOCK_SIZE];
-	// __shared__ float collected_depths[BLOCK_SIZE];
-
-	// In the forward, we stored the final value for T, the
-	// product of all (1 - alpha) factors. 
-	const float T_final = inside ? final_Ts[pix_id] : 0;
-	float T = T_final;
-
-	// We start from the back. The ID of the last contributing
-	// Gaussian is known from each pixel from the forward.
-	uint32_t contributor = toDo;
-	const int last_contributor = inside ? n_contrib[pix_id] : 0;
-
-	float accum_rec[C] = { 0 };
-	float dL_dpixel[C];
-
-#if RENDER_AXUTILITY
-	float dL_dreg;
-	float dL_ddepth;
-	float dL_daccum;
-	float dL_dnormal2D[3];
-	const int median_contributor = inside ? n_contrib[pix_id + H * W] : 0;
-	float dL_dmedian_depth;
-	float dL_dmax_dweight;
-
-	if (inside) {
-		dL_ddepth = dL_depths[DEPTH_OFFSET * H * W + pix_id];
-		dL_daccum = dL_depths[ALPHA_OFFSET * H * W + pix_id];
-		dL_dreg = dL_depths[DISTORTION_OFFSET * H * W + pix_id];
-		for (int i = 0; i < 3; i++) 
-			dL_dnormal2D[i] = dL_depths[(NORMAL_OFFSET + i) * H * W + pix_id];
-
-		dL_dmedian_depth = dL_depths[MIDDEPTH_OFFSET * H * W + pix_id];
-		// dL_dmax_dweight = dL_depths[MEDIAN_WEIGHT_OFFSET * H * W + pix_id];
+	// Load this lane's primitive data.
+	uint32_t global_id = 0;
+	float2 xy = {0.0f, 0.0f};
+	float3 Tu = {0.0f, 0.0f, 0.0f}, Tv = {0.0f, 0.0f, 0.0f}, Tw = {0.0f, 0.0f, 0.0f};
+	float normal[3] = {0.0f, 0.0f, 0.0f};
+	float opacity = 0.0f;
+	float color[3] = {0.0f, 0.0f, 0.0f};
+	float color_grad_factor[3] = {0.0f, 0.0f, 0.0f};
+	if (valid_primitive) {
+		global_id = point_list[instance_idx];
+		xy = points_xy_image[global_id];
+		Tu = {transMats[9 * global_id + 0], transMats[9 * global_id + 1], transMats[9 * global_id + 2]};
+		Tv = {transMats[9 * global_id + 3], transMats[9 * global_id + 4], transMats[9 * global_id + 5]};
+		Tw = {transMats[9 * global_id + 6], transMats[9 * global_id + 7], transMats[9 * global_id + 8]};
+		const float4 nor_o = normal_opacity[global_id];
+		normal[0] = nor_o.x; normal[1] = nor_o.y; normal[2] = nor_o.z; opacity = nor_o.w;
+		for (int ch = 0; ch < 3; ch++) {
+			const float cu = colors[global_id * 3 + ch];
+			color[ch] = fmaxf(cu, 0.0f);
+			color_grad_factor[ch] = (cu >= 0.0f) ? 1.0f : 0.0f;
+		}
 	}
 
-	// for compute gradient with respect to depth and normal
-	float last_depth = 0;
-	float last_normal[3] = { 0 };
-	float accum_depth_rec = 0;
-	float accum_alpha_rec = 0;
-	float accum_normal_rec[3] = {0};
-	// for compute gradient with respect to the distortion map
-	const float final_D = inside ? final_Ts[pix_id + H * W] : 0;
-	const float final_D2 = inside ? final_Ts[pix_id + 2 * H * W] : 0;
-	const float final_A = 1 - T_final;
-	float last_dL_dT = 0;
-#endif
+	// Per-primitive gradient accumulators (summed over all pixels of the tile).
+	float dL_dTu[3] = {0.0f, 0.0f, 0.0f};
+	float dL_dTv[3] = {0.0f, 0.0f, 0.0f};
+	float dL_dTw[3] = {0.0f, 0.0f, 0.0f};
+	float2 dL_dmean2d_acc = {0.0f, 0.0f};
+	float dL_dnormal_acc[3] = {0.0f, 0.0f, 0.0f};
+	float dL_dopacity_acc = 0.0f;
+	float dL_dcolor_acc[3] = {0.0f, 0.0f, 0.0f};
 
-	if (inside){
-		for (int i = 0; i < C; i++)
-			dL_dpixel[i] = dL_dpixels[i * H * W + pix_id];
-	}
+	const uint2 tile_coords = {tile_id % horizontal_blocks, tile_id / horizontal_blocks};
+	const uint2 start_pixel = {tile_coords.x * BLOCK_X, tile_coords.y * BLOCK_Y};
 
-	float last_alpha = 0;
-	float last_color[C] = { 0 };
+	// Per-bucket checkpoint slice (running accumulators BEFORE this bucket).
+	const float4* ckpt_color_T = bucket_color_T + (size_t)bucket_idx * BLOCK_SIZE;
+	const float4* ckpt_aux_dn = bucket_aux_dn + (size_t)bucket_idx * BLOCK_SIZE;
+	const float2* ckpt_aux_m = bucket_aux_m + (size_t)bucket_idx * BLOCK_SIZE;
 
-	// Gradient of pixel coordinate w.r.t. normalized 
-	// screen-space viewport corrdinates (-1 to 1)
-	const float ddelx_dx = 0.5 * W;
-	const float ddely_dy = 0.5 * H;
+	// Shared per-pixel state for the current group of 32 pixels.
+	__shared__ float sh_color_after[3][32];
+	__shared__ float sh_T[32];
+	__shared__ float sh_D_after[32];
+	__shared__ float sh_N_after[3][32];
+	__shared__ float sh_alpha_after[32];
+	__shared__ float sh_G_after[32];
+	__shared__ float sh_dL_dpix[3][32];
+	__shared__ float sh_dL_ddepth[32];
+	__shared__ float sh_dL_daccum[32];
+	__shared__ float sh_dL_dnormal[3][32];
+	__shared__ float sh_dL_dreg[32];
+	__shared__ float sh_dL_dmedian[32];
+	__shared__ float sh_grad_alpha_common[32];
+	__shared__ float sh_final_A[32];
+	__shared__ float sh_final_M1[32];
+	__shared__ float sh_final_M2[32];
+	__shared__ uint32_t sh_last_contrib[32];
+	__shared__ uint32_t sh_median_idx[32];
 
-	// Traverse all Gaussians
-	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
+	// Carried per-pixel registers (the pixel this lane handles at the current step).
+	float r_color_after[3] = {0.0f, 0.0f, 0.0f}, r_T = 1.0f, r_D_after = 0.0f;
+	float r_N_after[3] = {0.0f, 0.0f, 0.0f}, r_alpha_after = 0.0f, r_G_after = 0.0f;
+	float r_dL_dpix[3] = {0.0f, 0.0f, 0.0f}, r_dL_ddepth = 0.0f, r_dL_daccum = 0.0f;
+	float r_dL_dnormal[3] = {0.0f, 0.0f, 0.0f}, r_dL_dreg = 0.0f, r_dL_dmedian = 0.0f, r_grad_alpha_common = 0.0f;
+	float r_final_A = 0.0f, r_final_M1 = 0.0f, r_final_M2 = 0.0f;
+	uint32_t r_last_contrib = 0, r_median_idx = 0;
+
+	for (int i = 0; i < BLOCK_SIZE + 31; ++i)
 	{
-		// Load auxiliary data into shared memory, start in the BACK
-		// and load them in revers order.
-		block.sync();
-		const int progress = i * BLOCK_SIZE + block.thread_rank();
-		if (range.x + progress < range.y)
+		if (i % 32 == 0)
 		{
-			const int coll_id = point_list[range.y - progress - 1];
-			collected_id[block.thread_rank()] = coll_id;
-			collected_xy[block.thread_rank()] = points_xy_image[coll_id];
-			collected_normal_opacity[block.thread_rank()] = normal_opacity[coll_id];
-			collected_Tu[block.thread_rank()] = {transMats[9 * coll_id+0], transMats[9 * coll_id+1], transMats[9 * coll_id+2]};
-			collected_Tv[block.thread_rank()] = {transMats[9 * coll_id+3], transMats[9 * coll_id+4], transMats[9 * coll_id+5]};
-			collected_Tw[block.thread_rank()] = {transMats[9 * coll_id+6], transMats[9 * coll_id+7], transMats[9 * coll_id+8]};
-			for (int i = 0; i < C; i++)
-				collected_colors[i * BLOCK_SIZE + block.thread_rank()] = colors[coll_id * C + i];
-				// collected_depths[block.thread_rank()] = depths[coll_id];
-		}
-		block.sync();
-
-		// Iterate over Gaussians
-		for (int j = 0; !done && j < min(BLOCK_SIZE, toDo); j++)
-		{
-			// Keep track of current Gaussian ID. Skip, if this one
-			// is behind the last contributor for this pixel.
-			contributor--;
-			if (contributor >= last_contributor)
-				continue;
-
-			// compute ray-splat intersection as before
-			// Fisrt compute two homogeneous planes, See Eq. (8)
-			const float2 xy = collected_xy[j];
-			const float3 Tu = collected_Tu[j];
-			const float3 Tv = collected_Tv[j];
-			const float3 Tw = collected_Tw[j];
-			float3 k = pix.x * Tw - Tu;
-			float3 l = pix.y * Tw - Tv;
-			float3 p = cross(k, l);
-			if (p.z == 0.0) continue;
-			float2 s = {p.x / p.z, p.y / p.z};
-			float rho3d = (s.x * s.x + s.y * s.y); 
-			float2 d = {xy.x - pixf.x, xy.y - pixf.y};
-			float rho2d = FilterInvSquare * (d.x * d.x + d.y * d.y); 
-			float rho = min(rho3d, rho2d);
-
-			// compute depth
-			float c_d = (s.x * Tw.x + s.y * Tw.y) + Tw.z; // Tw * [u,v,1]
-			// if a point is too small, its depth is not reliable?
-			// c_d = (rho3d <= rho2d) ? c_d : Tw.z; 
-			if (c_d < near_n) continue;
-			
-			float4 nor_o = collected_normal_opacity[j];
-			float normal[3] = {nor_o.x, nor_o.y, nor_o.z};
-			float opa = nor_o.w;
-
-			// accumulations
-
-			float power = -0.5f * rho;
-			if (power > 0.0f)
-				continue;
-
-			const float G = exp(power);
-			const float alpha = min(0.99f, opa * G);
-			if (alpha < 1.0f / 255.0f)
-				continue;
-
-			T = T / (1.f - alpha);
-			const float dchannel_dcolor = alpha * T;
-			const float w = alpha * T;
-			// Propagate gradients to per-Gaussian colors and keep
-			// gradients w.r.t. alpha (blending factor for a Gaussian/pixel
-			// pair).
-			float dL_dalpha = 0.0f;
-			const int global_id = collected_id[j];
-			for (int ch = 0; ch < C; ch++)
+			const int local_idx = i + lane;
+			if (local_idx < BLOCK_SIZE)
 			{
-				const float c = collected_colors[ch * BLOCK_SIZE + j];
-				// Update last color (to be used in the next iteration)
-				accum_rec[ch] = last_alpha * last_color[ch] + (1.f - last_alpha) * accum_rec[ch];
-				last_color[ch] = c;
+				const uint2 pc = {start_pixel.x + local_idx % BLOCK_X, start_pixel.y + local_idx / BLOCK_X};
+				const bool pix_inside = pc.x < (uint32_t)W && pc.y < (uint32_t)H;
+				const uint32_t pid = W * pc.y + pc.x;
 
-				const float dL_dchannel = dL_dpixel[ch];
-				dL_dalpha += (c - accum_rec[ch]) * dL_dchannel;
-				// Update the gradients w.r.t. color of the Gaussian. 
-				// Atomic, since this pixel is just one of potentially
-				// many that were affected by this Gaussian.
-				atomicAdd(&(dL_dcolors[global_id * C + ch]), dchannel_dcolor * dL_dchannel);
+				float Tf = 0.0f, M1f = 0.0f, M2f = 0.0f;
+				float3 cfinal = {0.0f, 0.0f, 0.0f};
+				float Dfinal = 0.0f; float Nfinal[3] = {0.0f, 0.0f, 0.0f};
+				float dpix[3] = {0.0f, 0.0f, 0.0f};
+				float dd = 0.0f, da = 0.0f, dr = 0.0f, dn[3] = {0.0f, 0.0f, 0.0f}, dm = 0.0f;
+				uint32_t lastc = 0, medi = 0;
+				float4 cT = make_float4(0.0f, 0.0f, 0.0f, 1.0f);
+				float4 adn = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+				float2 amm = make_float2(0.0f, 0.0f);
+				if (pix_inside)
+				{
+					Tf = final_T[pid]; M1f = final_M1[pid]; M2f = final_M2[pid];
+					cfinal = make_float3(
+						out_color[0 * n_pixels + pid] - Tf * background.x,
+						out_color[1 * n_pixels + pid] - Tf * background.y,
+						out_color[2 * n_pixels + pid] - Tf * background.z);
+					Dfinal = out_others[DEPTH_OFFSET * n_pixels + pid];
+					for (int ch = 0; ch < 3; ch++) Nfinal[ch] = out_others[(NORMAL_OFFSET + ch) * n_pixels + pid];
+					for (int ch = 0; ch < 3; ch++) dpix[ch] = dL_dpixels[ch * n_pixels + pid];
+					dd = dL_depths[DEPTH_OFFSET * n_pixels + pid];
+					da = dL_depths[ALPHA_OFFSET * n_pixels + pid];
+					dr = dL_depths[DISTORTION_OFFSET * n_pixels + pid];
+					for (int ch = 0; ch < 3; ch++) dn[ch] = dL_depths[(NORMAL_OFFSET + ch) * n_pixels + pid];
+					dm = dL_depths[MIDDEPTH_OFFSET * n_pixels + pid];
+					lastc = n_contrib[pid]; medi = median_contrib[pid];
+					cT = ckpt_color_T[local_idx];
+					adn = ckpt_aux_dn[local_idx];
+					amm = ckpt_aux_m[local_idx];
+				}
+				const float T_pre = cT.w;
+				const float A_pre = 1.0f - T_pre;
+				const float final_A = 1.0f - Tf;
+				const float G_total = 2.0f * (final_A * M2f - M1f * M1f);
+				const float prefix_before = final_A * amm.y + M2f * A_pre - 2.0f * M1f * amm.x;
+
+				sh_color_after[0][lane] = cfinal.x - cT.x;
+				sh_color_after[1][lane] = cfinal.y - cT.y;
+				sh_color_after[2][lane] = cfinal.z - cT.z;
+				sh_T[lane] = T_pre;
+				sh_D_after[lane] = Dfinal - adn.x;
+				sh_N_after[0][lane] = Nfinal[0] - adn.y;
+				sh_N_after[1][lane] = Nfinal[1] - adn.z;
+				sh_N_after[2][lane] = Nfinal[2] - adn.w;
+				sh_alpha_after[lane] = T_pre - Tf;
+				sh_G_after[lane] = G_total - prefix_before;
+				for (int ch = 0; ch < 3; ch++) sh_dL_dpix[ch][lane] = dpix[ch];
+				sh_dL_ddepth[lane] = dd;
+				sh_dL_daccum[lane] = da;
+				for (int ch = 0; ch < 3; ch++) sh_dL_dnormal[ch][lane] = dn[ch];
+				sh_dL_dreg[lane] = dr;
+				sh_dL_dmedian[lane] = dm;
+				sh_grad_alpha_common[lane] = Tf * -(dpix[0] * background.x + dpix[1] * background.y + dpix[2] * background.z);
+				sh_final_A[lane] = final_A;
+				sh_final_M1[lane] = M1f;
+				sh_final_M2[lane] = M2f;
+				sh_last_contrib[lane] = lastc;
+				sh_median_idx[lane] = medi;
 			}
-
-			float dL_dz = 0.0f;
-			float dL_dweight = 0;
-#if RENDER_AXUTILITY
-			const float m_d = far_n / (far_n - near_n) * (1 - near_n / c_d);
-			const float dmd_dd = (far_n * near_n) / ((far_n - near_n) * c_d * c_d);
-			if (contributor == median_contributor-1) {
-				dL_dz += dL_dmedian_depth;
-				// dL_dweight += dL_dmax_dweight;
-			}
-#if DETACH_WEIGHT 
-			// if not detached weight, sometimes 
-			// it will bia toward creating extragated 2D Gaussians near front
-			dL_dweight += 0;
-#else
-			dL_dweight += (final_D2 + m_d * m_d * final_A - 2 * m_d * final_D) * dL_dreg;
-#endif
-			dL_dalpha += dL_dweight - last_dL_dT;
-			// propagate the current weight W_{i} to next weight W_{i-1}
-			last_dL_dT = dL_dweight * alpha + (1 - alpha) * last_dL_dT;
-			const float dL_dmd = 2.0f * (T * alpha) * (m_d * final_A - final_D) * dL_dreg;
-			dL_dz += dL_dmd * dmd_dd;
-
-			// Propagate gradients w.r.t ray-splat depths
-			accum_depth_rec = last_alpha * last_depth + (1.f - last_alpha) * accum_depth_rec;
-			last_depth = c_d;
-			dL_dalpha += (c_d - accum_depth_rec) * dL_ddepth;
-			// Propagate gradients w.r.t. color ray-splat alphas
-			accum_alpha_rec = last_alpha * 1.0 + (1.f - last_alpha) * accum_alpha_rec;
-			dL_dalpha += (1 - accum_alpha_rec) * dL_daccum;
-
-			// Propagate gradients to per-Gaussian normals
-			for (int ch = 0; ch < 3; ch++) {
-				accum_normal_rec[ch] = last_alpha * last_normal[ch] + (1.f - last_alpha) * accum_normal_rec[ch];
-				last_normal[ch] = normal[ch];
-				dL_dalpha += (normal[ch] - accum_normal_rec[ch]) * dL_dnormal2D[ch];
-				atomicAdd((&dL_dnormal3D[global_id * 3 + ch]), alpha * T * dL_dnormal2D[ch]);
-			}
-#endif
-
-			dL_dalpha *= T;
-			// Update last alpha (to be used in the next iteration)
-			last_alpha = alpha;
-
-			// Account for fact that alpha also influences how much of
-			// the background color is added if nothing left to blend
-			float bg_dot_dpixel = 0;
-			for (int i = 0; i < C; i++)
-				bg_dot_dpixel += bg_color[i] * dL_dpixel[i];
-			dL_dalpha += (-T_final / (1.f - alpha)) * bg_dot_dpixel;
-
-
-			// Helpful reusable temporary variables
-			const float dL_dG = nor_o.w * dL_dalpha;
-#if RENDER_AXUTILITY
-			dL_dz += alpha * T * dL_ddepth; 
-#endif
-
-			if (rho3d <= rho2d) {
-				// Update gradients w.r.t. covariance of Gaussian 3x3 (T)
-				const float2 dL_ds = {
-					dL_dG * -G * s.x + dL_dz * Tw.x,
-					dL_dG * -G * s.y + dL_dz * Tw.y
-				};
-				const float3 dz_dTw = {s.x, s.y, 1.0};
-				const float dsx_pz = dL_ds.x / p.z;
-				const float dsy_pz = dL_ds.y / p.z;
-				const float3 dL_dp = {dsx_pz, dsy_pz, -(dsx_pz * s.x + dsy_pz * s.y)};
-				const float3 dL_dk = cross(l, dL_dp);
-				const float3 dL_dl = cross(dL_dp, k);
-
-				const float3 dL_dTu = {-dL_dk.x, -dL_dk.y, -dL_dk.z};
-				const float3 dL_dTv = {-dL_dl.x, -dL_dl.y, -dL_dl.z};
-				const float3 dL_dTw = {
-					pixf.x * dL_dk.x + pixf.y * dL_dl.x + dL_dz * dz_dTw.x, 
-					pixf.x * dL_dk.y + pixf.y * dL_dl.y + dL_dz * dz_dTw.y, 
-					pixf.x * dL_dk.z + pixf.y * dL_dl.z + dL_dz * dz_dTw.z};
-
-
-				// Update gradients w.r.t. 3D covariance (3x3 matrix)
-				atomicAdd(&dL_dtransMat[global_id * 9 + 0],  dL_dTu.x);
-				atomicAdd(&dL_dtransMat[global_id * 9 + 1],  dL_dTu.y);
-				atomicAdd(&dL_dtransMat[global_id * 9 + 2],  dL_dTu.z);
-				atomicAdd(&dL_dtransMat[global_id * 9 + 3],  dL_dTv.x);
-				atomicAdd(&dL_dtransMat[global_id * 9 + 4],  dL_dTv.y);
-				atomicAdd(&dL_dtransMat[global_id * 9 + 5],  dL_dTv.z);
-				atomicAdd(&dL_dtransMat[global_id * 9 + 6],  dL_dTw.x);
-				atomicAdd(&dL_dtransMat[global_id * 9 + 7],  dL_dTw.y);
-				atomicAdd(&dL_dtransMat[global_id * 9 + 8],  dL_dTw.z);
-			} else {
-				// // Update gradients w.r.t. center of Gaussian 2D mean position
-				const float dG_ddelx = -G * FilterInvSquare * d.x;
-				const float dG_ddely = -G * FilterInvSquare * d.y;
-				atomicAdd(&dL_dmean2D[global_id].x, dL_dG * dG_ddelx); // not scaled
-				atomicAdd(&dL_dmean2D[global_id].y, dL_dG * dG_ddely); // not scaled
-				// // Propagate the gradients of depth
-				atomicAdd(&dL_dtransMat[global_id * 9 + 6],  s.x * dL_dz);
-				atomicAdd(&dL_dtransMat[global_id * 9 + 7],  s.y * dL_dz);
-				atomicAdd(&dL_dtransMat[global_id * 9 + 8],  dL_dz);
-			}
-
-			// Update gradients w.r.t. opacity of the Gaussian
-			atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
+			warp.sync();
 		}
+
+		if (i > 0)
+		{
+			for (int ch = 0; ch < 3; ch++) {
+				r_color_after[ch] = warp.shfl_up(r_color_after[ch], 1);
+				r_N_after[ch] = warp.shfl_up(r_N_after[ch], 1);
+				r_dL_dpix[ch] = warp.shfl_up(r_dL_dpix[ch], 1);
+				r_dL_dnormal[ch] = warp.shfl_up(r_dL_dnormal[ch], 1);
+			}
+			r_T = warp.shfl_up(r_T, 1);
+			r_D_after = warp.shfl_up(r_D_after, 1);
+			r_alpha_after = warp.shfl_up(r_alpha_after, 1);
+			r_G_after = warp.shfl_up(r_G_after, 1);
+			r_dL_ddepth = warp.shfl_up(r_dL_ddepth, 1);
+			r_dL_daccum = warp.shfl_up(r_dL_daccum, 1);
+			r_dL_dreg = warp.shfl_up(r_dL_dreg, 1);
+			r_dL_dmedian = warp.shfl_up(r_dL_dmedian, 1);
+			r_grad_alpha_common = warp.shfl_up(r_grad_alpha_common, 1);
+			r_final_A = warp.shfl_up(r_final_A, 1);
+			r_final_M1 = warp.shfl_up(r_final_M1, 1);
+			r_final_M2 = warp.shfl_up(r_final_M2, 1);
+			r_last_contrib = warp.shfl_up(r_last_contrib, 1);
+			r_median_idx = warp.shfl_up(r_median_idx, 1);
+		}
+
+		const int idx = i - (int)lane;
+		const int idx_clamped = (idx >= 0 && idx < BLOCK_SIZE) ? idx : 0;
+		const uint2 pc = {start_pixel.x + (uint32_t)(idx_clamped % BLOCK_X),
+						  start_pixel.y + (uint32_t)(idx_clamped / BLOCK_X)};
+		const bool valid_pixel = idx >= 0 && idx < BLOCK_SIZE && pc.x < (uint32_t)W && pc.y < (uint32_t)H;
+
+		// Leader thread reads freshly loaded shared state into registers.
+		if (lane == 0 && idx >= 0 && idx < BLOCK_SIZE)
+		{
+			const int s = i % 32;
+			for (int ch = 0; ch < 3; ch++) {
+				r_color_after[ch] = sh_color_after[ch][s];
+				r_N_after[ch] = sh_N_after[ch][s];
+				r_dL_dpix[ch] = sh_dL_dpix[ch][s];
+				r_dL_dnormal[ch] = sh_dL_dnormal[ch][s];
+			}
+			r_T = sh_T[s];
+			r_D_after = sh_D_after[s];
+			r_alpha_after = sh_alpha_after[s];
+			r_G_after = sh_G_after[s];
+			r_dL_ddepth = sh_dL_ddepth[s];
+			r_dL_daccum = sh_dL_daccum[s];
+			r_dL_dreg = sh_dL_dreg[s];
+			r_dL_dmedian = sh_dL_dmedian[s];
+			r_grad_alpha_common = sh_grad_alpha_common[s];
+			r_final_A = sh_final_A[s];
+			r_final_M1 = sh_final_M1[s];
+			r_final_M2 = sh_final_M2[s];
+			r_last_contrib = sh_last_contrib[s];
+			r_median_idx = sh_median_idx[s];
+		}
+
+		if (!valid_primitive || !valid_pixel || (uint32_t)tile_primitive_idx >= r_last_contrib)
+			continue;
+
+		const float2 pixf = {(float)pc.x, (float)pc.y};
+
+		// Recompute the surfel ray-splat intersection exactly as in the forward.
+		float3 kk = {pixf.x * Tw.x - Tu.x, pixf.x * Tw.y - Tu.y, pixf.x * Tw.z - Tu.z};
+		float3 ll = {pixf.y * Tw.x - Tv.x, pixf.y * Tw.y - Tv.y, pixf.y * Tw.z - Tv.z};
+		float3 pp = cross(kk, ll);
+		if (pp.z == 0.0f) continue;
+		float2 ss = {pp.x / pp.z, pp.y / pp.z};
+		float rho3d = ss.x * ss.x + ss.y * ss.y;
+		float2 dd2 = {xy.x - pixf.x, xy.y - pixf.y};
+		float rho2d = FilterInvSquare * (dd2.x * dd2.x + dd2.y * dd2.y);
+		float rho = min(rho3d, rho2d);
+		float depth = ss.x * Tw.x + ss.y * Tw.y + Tw.z;
+		if (depth < near_n) continue;
+		float power = -0.5f * rho;
+		if (power > 0.0f) continue;
+		float G = exp(power);
+		float alpha = min(0.99f, opacity * G);
+		if (alpha < 1.0f / 255.0f) continue;
+
+		const float T_i = r_T;
+		const float one_minus_alpha = 1.0f - alpha;
+		const float omar = 1.0f / fmaxf(one_minus_alpha, 1e-6f);
+		const float w = alpha * T_i;
+		const float m = far_n / (far_n - near_n) * (1.0f - near_n / depth);
+		const float g_i = m * m * r_final_A + r_final_M2 - 2.0f * m * r_final_M1;
+
+		// Update strictly-after suffix sums (subtract current contribution).
+		for (int ch = 0; ch < 3; ch++) r_color_after[ch] -= w * color[ch];
+		r_D_after -= w * depth;
+		for (int ch = 0; ch < 3; ch++) r_N_after[ch] -= w * normal[ch];
+		r_alpha_after -= w;
+		r_G_after -= w * g_i;
+
+		// dL/dalpha accumulation (FastGS convention: includes the T_i factor inline).
+		float dL_dalpha = 0.0f;
+		for (int ch = 0; ch < 3; ch++)
+			dL_dalpha += (T_i * color[ch] - r_color_after[ch] * omar) * r_dL_dpix[ch];
+		dL_dalpha += r_grad_alpha_common * omar;                                  // background
+		dL_dalpha += (T_i * depth - r_D_after * omar) * r_dL_ddepth;              // expected depth
+		dL_dalpha += (T_i - r_alpha_after * omar) * r_dL_daccum;                  // accumulated alpha
+		for (int ch = 0; ch < 3; ch++)
+			dL_dalpha += (T_i * normal[ch] - r_N_after[ch] * omar) * r_dL_dnormal[ch]; // normal
+		dL_dalpha += (T_i * g_i - r_G_after * omar) * r_dL_dreg;                  // distortion
+
+		// Direct color gradient.
+		for (int ch = 0; ch < 3; ch++)
+			dL_dcolor_acc[ch] += w * r_dL_dpix[ch] * color_grad_factor[ch];
+
+		// Depth (ray-splat) gradient.
+		float dL_dz = 0.0f;
+		if (r_median_idx != 0 && (uint32_t)(tile_primitive_idx + 1) == r_median_idx)
+			dL_dz += r_dL_dmedian;
+		const float dmd_dd = (far_n * near_n) / ((far_n - near_n) * depth * depth);
+		const float dL_dmd = 2.0f * w * (m * r_final_A - r_final_M1) * r_dL_dreg;
+		dL_dz += dL_dmd * dmd_dd;
+		dL_dz += w * r_dL_ddepth;
+
+		// Direct normal gradient.
+		for (int ch = 0; ch < 3; ch++)
+			dL_dnormal_acc[ch] += w * r_dL_dnormal[ch];
+
+		const float dL_dG = opacity * dL_dalpha;
+		dL_dopacity_acc += G * dL_dalpha;
+
+		if (rho3d <= rho2d) {
+			const float2 dL_ds = {dL_dG * -G * ss.x + dL_dz * Tw.x, dL_dG * -G * ss.y + dL_dz * Tw.y};
+			const float3 dz_dTw = {ss.x, ss.y, 1.0f};
+			const float dsx_pz = dL_ds.x / pp.z;
+			const float dsy_pz = dL_ds.y / pp.z;
+			const float3 dL_dp = {dsx_pz, dsy_pz, -(dsx_pz * ss.x + dsy_pz * ss.y)};
+			const float3 dL_dk = cross(ll, dL_dp);
+			const float3 dL_dl = cross(dL_dp, kk);
+			dL_dTu[0] += -dL_dk.x; dL_dTu[1] += -dL_dk.y; dL_dTu[2] += -dL_dk.z;
+			dL_dTv[0] += -dL_dl.x; dL_dTv[1] += -dL_dl.y; dL_dTv[2] += -dL_dl.z;
+			dL_dTw[0] += pixf.x * dL_dk.x + pixf.y * dL_dl.x + dL_dz * dz_dTw.x;
+			dL_dTw[1] += pixf.x * dL_dk.y + pixf.y * dL_dl.y + dL_dz * dz_dTw.y;
+			dL_dTw[2] += pixf.x * dL_dk.z + pixf.y * dL_dl.z + dL_dz * dz_dTw.z;
+		} else {
+			const float dG_ddelx = -G * FilterInvSquare * dd2.x;
+			const float dG_ddely = -G * FilterInvSquare * dd2.y;
+			dL_dmean2d_acc.x += dL_dG * dG_ddelx;
+			dL_dmean2d_acc.y += dL_dG * dG_ddely;
+			dL_dTw[0] += ss.x * dL_dz;
+			dL_dTw[1] += ss.y * dL_dz;
+			dL_dTw[2] += dL_dz;
+		}
+
+		// Advance transmittance for the next lane handling this pixel.
+		r_T *= one_minus_alpha;
+	}
+
+	if (valid_primitive)
+	{
+		atomicAdd(&dL_dtransMat[global_id * 9 + 0], dL_dTu[0]);
+		atomicAdd(&dL_dtransMat[global_id * 9 + 1], dL_dTu[1]);
+		atomicAdd(&dL_dtransMat[global_id * 9 + 2], dL_dTu[2]);
+		atomicAdd(&dL_dtransMat[global_id * 9 + 3], dL_dTv[0]);
+		atomicAdd(&dL_dtransMat[global_id * 9 + 4], dL_dTv[1]);
+		atomicAdd(&dL_dtransMat[global_id * 9 + 5], dL_dTv[2]);
+		atomicAdd(&dL_dtransMat[global_id * 9 + 6], dL_dTw[0]);
+		atomicAdd(&dL_dtransMat[global_id * 9 + 7], dL_dTw[1]);
+		atomicAdd(&dL_dtransMat[global_id * 9 + 8], dL_dTw[2]);
+		atomicAdd(&dL_dmean2D[global_id].x, dL_dmean2d_acc.x);
+		atomicAdd(&dL_dmean2D[global_id].y, dL_dmean2d_acc.y);
+		for (int ch = 0; ch < 3; ch++) atomicAdd(&dL_dnormal3D[global_id * 3 + ch], dL_dnormal_acc[ch]);
+		atomicAdd(&dL_dopacity[global_id], dL_dopacity_acc);
+		for (int ch = 0; ch < 3; ch++) atomicAdd(&dL_dcolors[global_id * 3 + ch], dL_dcolor_acc[ch]);
 	}
 }
 
@@ -689,7 +748,7 @@ void BACKWARD::preprocess(
 }
 
 void BACKWARD::render(
-	const dim3 grid, const dim3 block,
+	int n_buckets,
 	const uint2* ranges,
 	const uint32_t* point_list,
 	int W, int H,
@@ -697,11 +756,22 @@ void BACKWARD::render(
 	const float* bg_color,
 	const float2* means2D,
 	const float4* normal_opacity,
-	const float* colors,
 	const float* transMats,
+	const float* colors,
 	const float* depths,
-	const float* final_Ts,
+	const float* out_color,
+	const float* out_others,
+	const float* final_T,
+	const float* final_M1,
+	const float* final_M2,
 	const uint32_t* n_contrib,
+	const uint32_t* median_contrib,
+	const uint32_t* max_contrib,
+	const uint32_t* tile_bucket_offsets,
+	const uint32_t* bucket_tile_index,
+	const float4* bucket_color_T,
+	const float4* bucket_aux_dn,
+	const float2* bucket_aux_m,
 	const float* dL_dpixels,
 	const float* dL_depths,
 	float * dL_dtransMat,
@@ -710,19 +780,29 @@ void BACKWARD::render(
 	float* dL_dopacity,
 	float* dL_dcolors)
 {
-	renderCUDA<NUM_CHANNELS> << <grid, block >> >(
+	if (n_buckets == 0) return;
+	renderCUDA<NUM_CHANNELS> << <n_buckets, 32 >> >(
 		ranges,
 		point_list,
 		W, H,
-		focal_x, focal_y,
 		bg_color,
 		means2D,
 		normal_opacity,
 		transMats,
 		colors,
-		depths,
-		final_Ts,
+		out_color,
+		out_others,
+		final_T,
+		final_M1,
+		final_M2,
 		n_contrib,
+		median_contrib,
+		max_contrib,
+		tile_bucket_offsets,
+		bucket_tile_index,
+		bucket_color_T,
+		bucket_aux_dn,
+		bucket_aux_m,
 		dL_dpixels,
 		dL_depths,
 		dL_dtransMat,

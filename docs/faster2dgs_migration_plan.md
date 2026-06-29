@@ -76,12 +76,10 @@ Acceptance:
    - `aux[5]`: median depth
    - `aux[6]`: distortion
 
-**Status (implemented):** Native surfel CUDA kernels vendored into
+**Status (implemented):** Native surfel CUDA kernels in
 `Faster2DGSCudaBackend/surfel_rasterization/` and built with
-`python scripts/install.py -m Faster2DGS`. Default configs use
-`USE_DIFF_SURFEL_BACKEND=false` (no external pip package). Legacy external
-`diff-surfel-rasterization` remains opt-in via `USE_DIFF_SURFEL_BACKEND=true`.
-Old FastGS 3D bridge is last-resort fallback only.
+`python scripts/install.py -m Faster2DGS`. No external rasterizer pip package.
+Old FastGS 3D bridge removed.
 
 Acceptance:
 - `render_image_inference` returns non-degenerate `rgb/depth/alpha/normal` on trained checkpoint.
@@ -157,3 +155,34 @@ These should be decided once and not changed mid-port:
 ## 5) Immediate Next Coding Task
 
 Implement **Phase A** (new backend skeleton + forward/backward interface) and switch `Faster2DGSRenderer` behind a feature flag to use it when available.
+
+
+## Phase G - Native Fast2DGS surfel kernels (NeRFICG, FastGS bucket infra)
+
+**Status (implemented).** Faster2DGS uses a single in-repo CUDA backend
+(`Faster2DGSCudaBackend._C`). No external `diff-surfel-rasterization` pip package,
+no FasterGS 3D bridge fallback, and no `DiffSurfelBackend` adapter.
+
+What was kept from FastGS:
+- 32-primitive **bucket checkpointing** and the `<<<n_buckets, 32>>>`
+  warp-parallel backward.
+- Buffer/blob allocation pattern (`GeometryState` / `BinningState` /
+  `BucketState`), `cub` depth+tile sorting, per-tile instance ranges.
+
+What is 2DGS surfel math (NeRFICG implementation):
+- Preprocess: `compute_transmat` (tangent-plane `T`, 9 floats) + `compute_aabb`
+  + view-space normal; depth key = `p_view.z`.
+- Blend: ray-splat UV intersection, `rho = min(rho3d, rho2d)`, 7-channel allmap
+  (expected depth, alpha, normal, median depth, distortion).
+- Analytic aux backward folded into the bucket-parallel pass via front-to-back
+  reconstruction from bucket checkpoints (`color, T, D, N, M1, M2`).
+
+Build: `python scripts/install.py -m Faster2DGS` (GLM vendored under
+`Faster2DGSCudaBackend/third_party/glm`).
+
+Validation: `scripts/faster2dgs_kernel_parity.py` (native smoke + timing).
+
+Acceptance checklist (plan Phase 6):
+- Kernel fwd+bwd smoke on stump (32k splats): no NaN, gradients non-zero.
+- Training: `python scripts/train.py -c configs/gs_stump_2DGS.yaml -s` with native backend log line.
+- Paper parity: `python scripts/run_mip360_2dgs_benchmark.py` (bicycle 24.87 / stump 26.47 / kitchen 30.50 / garden 26.95 PSNR targets).

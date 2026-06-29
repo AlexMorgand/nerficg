@@ -1,16 +1,25 @@
-# Native 2DGS surfel CUDA rasterizer
+# Faster2DGS native surfel CUDA rasterizer
 
-Perspective-correct surfel rasterization for Faster2DGS, vendored from the
-[2D Gaussian Splatting](https://github.com/hbb1/2d-gaussian-splatting) /
-[diff-surfel-rasterization](https://github.com/hbb1/diff-surfel-rasterization)
-reference implementation (Inria GRAPHDECO, non-commercial license — see
-`submodules/diff-surfel-rasterization/LICENSE.md`).
+NeRFICG implementation of perspective-correct 2D Gaussian surfel rasterization.
+Built as `Faster2DGSCudaBackend._C` — no external rasterizer packages required.
 
-Built as part of `Faster2DGSCudaBackend._C` — no separate pip package required.
+## Architecture
 
-Outputs:
-- RGB (3 × H × W)
-- Allmap (7 × H × W): expected depth, alpha, view-space normal, median depth, distortion
+- **FastGS bucket infrastructure**: depth/tile sorting, 32-primitive bucket checkpoints,
+  `<<<n_buckets, 32>>>` warp-parallel backward.
+- **2DGS surfel math**: tangent-plane transform `T`, ray–splat UV intersection,
+  `rho = min(rho3d, rho2d)`, 7-channel allmap (expected depth, alpha, normal,
+  median depth, distortion).
 
-GLM headers are taken from `submodules/diff-surfel-rasterization/third_party/glm`
-at build time (`git submodule update --init`).
+## Outputs
+
+- RGB: `(3, H, W)`
+- Allmap: `(7, H, W)` — same channel layout as the 2DGS paper training code
+
+## Build
+
+```bash
+python scripts/install.py -m Faster2DGS
+```
+
+GLM headers are vendored under `third_party/glm/` (MIT).

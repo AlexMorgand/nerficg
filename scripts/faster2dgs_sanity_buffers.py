@@ -90,7 +90,7 @@ def _log_buffer_sanity(dataset, model) -> None:
         )
 
     Logger.log_info(
-        '2DGS: diff-surfel uses 7-ch allmap (expected depth, alpha, normal, median, distortion). '
+        '2DGS: native surfel allmap uses 7 channels (expected depth, alpha, normal, median, distortion). '
         'Bridge fallback: rend_normal = disk axis R[:,2]; rend_dist = depth variance.'
     )
     Framework.teardown()

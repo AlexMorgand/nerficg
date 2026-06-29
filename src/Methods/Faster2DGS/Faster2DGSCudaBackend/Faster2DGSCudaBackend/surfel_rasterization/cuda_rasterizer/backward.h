@@ -1,12 +1,7 @@
 /*
- * Copyright (C) 2023, Inria
- * GRAPHDECO research group, https://team.inria.fr/graphdeco
- * All rights reserved.
- *
- * This software is free for non-commercial, research and evaluation use 
- * under the terms of the LICENSE.md file.
- *
- * For inquiries contact  george.drettakis@inria.fr
+ * Faster2DGS native surfel rasterizer (NeRFICG).
+ * Bucket-checkpoint orchestration from FastGS; surfel forward/backward implements
+ * the 2D Gaussian Splatting perspective-disk formulation.
  */
 
 #ifndef CUDA_RASTERIZER_BACKWARD_H_INCLUDED
@@ -21,7 +16,7 @@
 namespace BACKWARD
 {
 	void render(
-		const dim3 grid, dim3 block,
+		int n_buckets,
 		const uint2* ranges,
 		const uint32_t* point_list,
 		int W, int H,
@@ -32,8 +27,19 @@ namespace BACKWARD
 		const float* transMats,
 		const float* colors,
 		const float* depths,
-		const float* final_Ts,
+		const float* out_color,
+		const float* out_others,
+		const float* final_T,
+		const float* final_M1,
+		const float* final_M2,
 		const uint32_t* n_contrib,
+		const uint32_t* median_contrib,
+		const uint32_t* max_contrib,
+		const uint32_t* tile_bucket_offsets,
+		const uint32_t* bucket_tile_index,
+		const float4* bucket_color_T,
+		const float4* bucket_aux_dn,
+		const float2* bucket_aux_m,
 		const float* dL_dpixels,
 		const float* dL_depths,
 		float * dL_dtransMat,

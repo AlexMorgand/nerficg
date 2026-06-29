@@ -16,8 +16,6 @@ RENDERER:
     FORCE_OPTIMIZED_INFERENCE: false
     # Faster2DGSRenderer — surfel path uses Faster2DGSCudaBackend; set false to use FasterGS diff_rasterize_with_aux only.
     REQUIRE_TRUE_2DGS_KERNEL: false
-    USE_SURFEL_BACKEND_API: true
-    Z_LOG_SCALE_COMPAT: -6.0
 
 TRAINING:
     LOAD_CHECKPOINT: null
