@@ -20,15 +20,16 @@ from Methods.FasterGS.Trainer import FasterGSTrainer
     GEOMETRY_LOG_INTERVAL=10,
     # Match FastGS / pre-parity behavior; official 2DGS uses 0.05 but that culls all
     # surfels still at the 0.01 opacity-reset floor unless counts stay low (~400k not 1.6M).
-    DENSIFICATION_OPACITY_CULL=0.005,
+    # Official 2DGS densify_and_prune uses min_opacity=0.05 (with opacity_reset=0.01).
+    DENSIFICATION_OPACITY_CULL=0.05,
     DENSIFICATION_MAX_SCREEN_SIZE=20,
     SKIP_FINAL_OPACITY_PRUNE=True,
     # Ramp distortion after each opacity-reset pause (smoothstep per reset cycle).
     GEOMETRY_WARMUP_DURATION=1_500,
     # After distortion starts, briefly skip opacity cull right after each opacity reset only.
     OPACITY_CULL_GRACE_AFTER_RESET=True,
-    # Softer reset than 3DGS 0.01 — large surfel counts need higher floor to avoid a dark spell.
-    OPACITY_RESET_MAX=0.05,
+    # Match official 2DGS opacity_reset_interval (min(α, 0.01)).
+    OPACITY_RESET_MAX=0.01,
     # Photometric-only recovery after each periodic opacity reset before distortion ramps again.
     DISTORTION_PAUSE_AFTER_RESET=500,
     # Scale λ_d down when splat count exceeds official ~400k at 3k (avoids opacity crush).

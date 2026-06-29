@@ -154,9 +154,8 @@ class Gaussians2D(Gaussians):
         skip_opacity_prune: bool = False,
     ) -> None:
         """Clone/split with 2DGS-style in-plane sampling (zero extent along local normal)."""
-        # reset_opacities() clamps to ~0.01; culling above that evicts the whole cloud right after 3k.
         if not skip_opacity_prune:
-            min_opacity = min(float(min_opacity), 0.01)
+            min_opacity = float(min_opacity)
         n_before = self._means.shape[0]
         densification_mask = self.densification_info[1] >= grad_threshold * self.densification_info[0].clamp_min(1.0)
         is_small = torch.max(self._scales, dim=1).values <= math.log(self.percent_dense * self.training_cameras_extent)
