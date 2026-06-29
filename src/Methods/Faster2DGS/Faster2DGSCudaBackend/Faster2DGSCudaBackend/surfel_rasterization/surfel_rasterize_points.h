@@ -57,7 +57,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const torch::Tensor& imageBuffer,
 	const torch::Tensor& out_color,
 	const torch::Tensor& out_others,
-	const bool debug);
+	const bool debug,
+	const bool photometric_only);
 		
 torch::Tensor markVisible(
 		torch::Tensor& means3D,

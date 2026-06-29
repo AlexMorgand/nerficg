@@ -134,6 +134,239 @@ __device__ void computeColorFromSH(int idx, int deg, int max_coeffs, const glm::
 }
 
 
+// Photometric-only bucket backward: color + opacity + transMat, no 7-ch aux.
+__global__ void __launch_bounds__(32)
+renderCUDA_color_only(
+	const uint2* __restrict__ ranges,
+	const uint32_t* __restrict__ point_list,
+	int W, int H,
+	const float* __restrict__ bg_color,
+	const float2* __restrict__ points_xy_image,
+	const float4* __restrict__ normal_opacity,
+	const float* __restrict__ transMats,
+	const float* __restrict__ colors,
+	const float* __restrict__ out_color,
+	const float* __restrict__ final_T,
+	const uint32_t* __restrict__ n_contrib,
+	const uint32_t* __restrict__ max_contrib,
+	const uint32_t* __restrict__ tile_bucket_offsets,
+	const uint32_t* __restrict__ bucket_tile_index,
+	const float4* __restrict__ bucket_color_T,
+	const float* __restrict__ dL_dpixels,
+	float* __restrict__ dL_dtransMat,
+	float3* __restrict__ dL_dmean2D,
+	float* __restrict__ dL_dopacity,
+	float* __restrict__ dL_dcolors)
+{
+	auto block = cg::this_thread_block();
+	auto warp = cg::tiled_partition<32>(block);
+	const uint32_t bucket_idx = block.group_index().x;
+	const uint32_t lane = warp.thread_rank();
+
+	const uint32_t horizontal_blocks = (W + BLOCK_X - 1) / BLOCK_X;
+	const uint32_t tile_id = bucket_tile_index[bucket_idx];
+	const uint2 range = ranges[tile_id];
+	const int tile_n_primitives = range.y - range.x;
+	const uint32_t tile_first_bucket = (tile_id == 0) ? 0u : tile_bucket_offsets[tile_id - 1];
+	const int tile_bucket_idx = bucket_idx - tile_first_bucket;
+	if (tile_bucket_idx * SURFEL_BUCKET_SIZE >= (int)max_contrib[tile_id]) return;
+
+	const int tile_primitive_idx = tile_bucket_idx * SURFEL_BUCKET_SIZE + lane;
+	const int instance_idx = range.x + tile_primitive_idx;
+	const bool valid_primitive = tile_primitive_idx < tile_n_primitives;
+
+	const uint32_t n_pixels = (uint32_t)W * (uint32_t)H;
+	const float3 background = make_float3(bg_color[0], bg_color[1], bg_color[2]);
+
+	uint32_t global_id = 0;
+	float2 xy = {0.0f, 0.0f};
+	float3 Tu = {0.0f, 0.0f, 0.0f}, Tv = {0.0f, 0.0f, 0.0f}, Tw = {0.0f, 0.0f, 0.0f};
+	float opacity = 0.0f;
+	float color[3] = {0.0f, 0.0f, 0.0f};
+	float color_grad_factor[3] = {0.0f, 0.0f, 0.0f};
+	if (valid_primitive) {
+		global_id = point_list[instance_idx];
+		xy = points_xy_image[global_id];
+		Tu = {transMats[9 * global_id + 0], transMats[9 * global_id + 1], transMats[9 * global_id + 2]};
+		Tv = {transMats[9 * global_id + 3], transMats[9 * global_id + 4], transMats[9 * global_id + 5]};
+		Tw = {transMats[9 * global_id + 6], transMats[9 * global_id + 7], transMats[9 * global_id + 8]};
+		opacity = normal_opacity[global_id].w;
+		for (int ch = 0; ch < 3; ch++) {
+			const float cu = colors[global_id * 3 + ch];
+			color[ch] = fmaxf(cu, 0.0f);
+			color_grad_factor[ch] = (cu >= 0.0f) ? 1.0f : 0.0f;
+		}
+	}
+
+	float dL_dTu[3] = {0.0f, 0.0f, 0.0f};
+	float dL_dTv[3] = {0.0f, 0.0f, 0.0f};
+	float dL_dTw[3] = {0.0f, 0.0f, 0.0f};
+	float2 dL_dmean2d_acc = {0.0f, 0.0f};
+	float dL_dopacity_acc = 0.0f;
+	float dL_dcolor_acc[3] = {0.0f, 0.0f, 0.0f};
+
+	const uint2 tile_coords = {tile_id % horizontal_blocks, tile_id / horizontal_blocks};
+	const uint2 start_pixel = {tile_coords.x * BLOCK_X, tile_coords.y * BLOCK_Y};
+	const float4* ckpt_color_T = bucket_color_T + (size_t)bucket_idx * BLOCK_SIZE;
+
+	__shared__ float sh_color_after[3][32];
+	__shared__ float sh_T[32];
+	__shared__ float sh_dL_dpix[3][32];
+	__shared__ float sh_grad_alpha_common[32];
+	__shared__ uint32_t sh_last_contrib[32];
+
+	float r_color_after[3] = {0.0f, 0.0f, 0.0f}, r_T = 1.0f;
+	float r_dL_dpix[3] = {0.0f, 0.0f, 0.0f}, r_grad_alpha_common = 0.0f;
+	uint32_t r_last_contrib = 0;
+
+	for (int i = 0; i < BLOCK_SIZE + 31; ++i)
+	{
+		if (i % 32 == 0)
+		{
+			const int local_idx = i + lane;
+			if (local_idx < BLOCK_SIZE)
+			{
+				const uint2 pc = {start_pixel.x + local_idx % BLOCK_X, start_pixel.y + local_idx / BLOCK_X};
+				const bool pix_inside = pc.x < (uint32_t)W && pc.y < (uint32_t)H;
+				const uint32_t pid = W * pc.y + pc.x;
+
+				float Tf = 0.0f;
+				float3 cfinal = {0.0f, 0.0f, 0.0f};
+				float dpix[3] = {0.0f, 0.0f, 0.0f};
+				uint32_t lastc = 0;
+				float4 cT = make_float4(0.0f, 0.0f, 0.0f, 1.0f);
+				if (pix_inside)
+				{
+					Tf = final_T[pid];
+					cfinal = make_float3(
+						out_color[0 * n_pixels + pid] - Tf * background.x,
+						out_color[1 * n_pixels + pid] - Tf * background.y,
+						out_color[2 * n_pixels + pid] - Tf * background.z);
+					for (int ch = 0; ch < 3; ch++) dpix[ch] = dL_dpixels[ch * n_pixels + pid];
+					lastc = n_contrib[pid];
+					cT = ckpt_color_T[local_idx];
+				}
+
+				sh_color_after[0][lane] = cfinal.x - cT.x;
+				sh_color_after[1][lane] = cfinal.y - cT.y;
+				sh_color_after[2][lane] = cfinal.z - cT.z;
+				sh_T[lane] = cT.w;
+				for (int ch = 0; ch < 3; ch++) sh_dL_dpix[ch][lane] = dpix[ch];
+				sh_grad_alpha_common[lane] = Tf * -(dpix[0] * background.x + dpix[1] * background.y + dpix[2] * background.z);
+				sh_last_contrib[lane] = lastc;
+			}
+			warp.sync();
+		}
+
+		if (i > 0)
+		{
+			for (int ch = 0; ch < 3; ch++) {
+				r_color_after[ch] = warp.shfl_up(r_color_after[ch], 1);
+				r_dL_dpix[ch] = warp.shfl_up(r_dL_dpix[ch], 1);
+			}
+			r_T = warp.shfl_up(r_T, 1);
+			r_grad_alpha_common = warp.shfl_up(r_grad_alpha_common, 1);
+			r_last_contrib = warp.shfl_up(r_last_contrib, 1);
+		}
+
+		const int idx = i - (int)lane;
+		const int idx_clamped = (idx >= 0 && idx < BLOCK_SIZE) ? idx : 0;
+		const uint2 pc = {start_pixel.x + (uint32_t)(idx_clamped % BLOCK_X),
+						  start_pixel.y + (uint32_t)(idx_clamped / BLOCK_X)};
+		const bool valid_pixel = idx >= 0 && idx < BLOCK_SIZE && pc.x < (uint32_t)W && pc.y < (uint32_t)H;
+
+		if (lane == 0 && idx >= 0 && idx < BLOCK_SIZE)
+		{
+			const int s = i % 32;
+			for (int ch = 0; ch < 3; ch++) {
+				r_color_after[ch] = sh_color_after[ch][s];
+				r_dL_dpix[ch] = sh_dL_dpix[ch][s];
+			}
+			r_T = sh_T[s];
+			r_grad_alpha_common = sh_grad_alpha_common[s];
+			r_last_contrib = sh_last_contrib[s];
+		}
+
+		if (!valid_primitive || !valid_pixel || (uint32_t)tile_primitive_idx >= r_last_contrib)
+			continue;
+
+		const float2 pixf = {(float)pc.x, (float)pc.y};
+		float3 kk = {pixf.x * Tw.x - Tu.x, pixf.x * Tw.y - Tu.y, pixf.x * Tw.z - Tu.z};
+		float3 ll = {pixf.y * Tw.x - Tv.x, pixf.y * Tw.y - Tv.y, pixf.y * Tw.z - Tv.z};
+		float3 pp = cross(kk, ll);
+		if (pp.z == 0.0f) continue;
+		float2 ss = {pp.x / pp.z, pp.y / pp.z};
+		float rho3d = ss.x * ss.x + ss.y * ss.y;
+		float2 dd2 = {xy.x - pixf.x, xy.y - pixf.y};
+		float rho2d = FilterInvSquare * (dd2.x * dd2.x + dd2.y * dd2.y);
+		float rho = min(rho3d, rho2d);
+		float depth = ss.x * Tw.x + ss.y * Tw.y + Tw.z;
+		if (depth < near_n) continue;
+		float power = -0.5f * rho;
+		if (power > 0.0f) continue;
+		float G = exp(power);
+		float alpha = min(0.99f, opacity * G);
+		if (alpha < 1.0f / 255.0f) continue;
+
+		const float T_i = r_T;
+		const float one_minus_alpha = 1.0f - alpha;
+		const float omar = 1.0f / fmaxf(one_minus_alpha, 1e-6f);
+		const float w = alpha * T_i;
+
+		for (int ch = 0; ch < 3; ch++) r_color_after[ch] -= w * color[ch];
+
+		float dL_dalpha = 0.0f;
+		for (int ch = 0; ch < 3; ch++)
+			dL_dalpha += (T_i * color[ch] - r_color_after[ch] * omar) * r_dL_dpix[ch];
+		dL_dalpha += r_grad_alpha_common * omar;
+
+		for (int ch = 0; ch < 3; ch++)
+			dL_dcolor_acc[ch] += w * r_dL_dpix[ch] * color_grad_factor[ch];
+
+		const float dL_dG = opacity * dL_dalpha;
+		dL_dopacity_acc += G * dL_dalpha;
+
+		if (rho3d <= rho2d) {
+			const float2 dL_ds = {dL_dG * -G * ss.x, dL_dG * -G * ss.y};
+			const float dsx_pz = dL_ds.x / pp.z;
+			const float dsy_pz = dL_ds.y / pp.z;
+			const float3 dL_dp = {dsx_pz, dsy_pz, -(dsx_pz * ss.x + dsy_pz * ss.y)};
+			const float3 dL_dk = cross(ll, dL_dp);
+			const float3 dL_dl = cross(dL_dp, kk);
+			dL_dTu[0] += -dL_dk.x; dL_dTu[1] += -dL_dk.y; dL_dTu[2] += -dL_dk.z;
+			dL_dTv[0] += -dL_dl.x; dL_dTv[1] += -dL_dl.y; dL_dTv[2] += -dL_dl.z;
+			dL_dTw[0] += pixf.x * dL_dk.x + pixf.y * dL_dl.x;
+			dL_dTw[1] += pixf.x * dL_dk.y + pixf.y * dL_dl.y;
+			dL_dTw[2] += pixf.x * dL_dk.z + pixf.y * dL_dl.z;
+		} else {
+			const float dG_ddelx = -G * FilterInvSquare * dd2.x;
+			const float dG_ddely = -G * FilterInvSquare * dd2.y;
+			dL_dmean2d_acc.x += dL_dG * dG_ddelx;
+			dL_dmean2d_acc.y += dL_dG * dG_ddely;
+		}
+
+		r_T *= one_minus_alpha;
+	}
+
+	if (valid_primitive)
+	{
+		atomicAdd(&dL_dtransMat[global_id * 9 + 0], dL_dTu[0]);
+		atomicAdd(&dL_dtransMat[global_id * 9 + 1], dL_dTu[1]);
+		atomicAdd(&dL_dtransMat[global_id * 9 + 2], dL_dTu[2]);
+		atomicAdd(&dL_dtransMat[global_id * 9 + 3], dL_dTv[0]);
+		atomicAdd(&dL_dtransMat[global_id * 9 + 4], dL_dTv[1]);
+		atomicAdd(&dL_dtransMat[global_id * 9 + 5], dL_dTv[2]);
+		atomicAdd(&dL_dtransMat[global_id * 9 + 6], dL_dTw[0]);
+		atomicAdd(&dL_dtransMat[global_id * 9 + 7], dL_dTw[1]);
+		atomicAdd(&dL_dtransMat[global_id * 9 + 8], dL_dTw[2]);
+		atomicAdd(&dL_dmean2D[global_id].x, dL_dmean2d_acc.x);
+		atomicAdd(&dL_dmean2D[global_id].y, dL_dmean2d_acc.y);
+		atomicAdd(&dL_dopacity[global_id], dL_dopacity_acc);
+		for (int ch = 0; ch < 3; ch++) atomicAdd(&dL_dcolors[global_id * 3 + ch], dL_dcolor_acc[ch]);
+	}
+}
+
+
 // Backward version of the rendering procedure (FastGS bucket-parallel).
 //
 // One block per bucket, 32 lanes = the 32 (depth-sorted) primitives of that
@@ -778,9 +1011,35 @@ void BACKWARD::render(
 	float3* dL_dmean2D,
 	float* dL_dnormal3D,
 	float* dL_dopacity,
-	float* dL_dcolors)
+	float* dL_dcolors,
+	bool photometric_only)
 {
 	if (n_buckets == 0) return;
+	if (photometric_only) {
+		renderCUDA_color_only << <n_buckets, 32 >> >(
+			ranges,
+			point_list,
+			W, H,
+			bg_color,
+			means2D,
+			normal_opacity,
+			transMats,
+			colors,
+			out_color,
+			final_T,
+			n_contrib,
+			max_contrib,
+			tile_bucket_offsets,
+			bucket_tile_index,
+			bucket_color_T,
+			dL_dpixels,
+			dL_dtransMat,
+			dL_dmean2D,
+			dL_dopacity,
+			dL_dcolors
+		);
+		return;
+	}
 	renderCUDA<NUM_CHANNELS> << <n_buckets, 32 >> >(
 		ranges,
 		point_list,

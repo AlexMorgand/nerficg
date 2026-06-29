@@ -153,6 +153,11 @@ class _RasterizeSurfels(torch.autograd.Function):
         settings = ctx.settings
         num_rendered = ctx.num_rendered
         colors_precomp, means3D, scales_2d, rotations, cov3Ds_precomp, radii, sh, geom_buffer, binning_buffer, img_buffer, out_color, out_others = ctx.saved_tensors
+        with torch.no_grad():
+            photometric_only = (
+                grad_allmap.numel() == 0
+                or float(grad_allmap.abs().max()) == 0.0
+            )
         (
             grad_means2D,
             grad_colors_precomp,
@@ -187,6 +192,7 @@ class _RasterizeSurfels(torch.autograd.Function):
             out_color,
             out_others,
             settings.debug,
+            photometric_only,
         )
         del grad_colors_precomp, grad_cov3Ds_precomp
         return grad_means3D, grad_means2D, grad_sh, grad_opacities, grad_scales_2d, grad_rotations, None
