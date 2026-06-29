@@ -22,6 +22,7 @@ class Faster2DGSLoss(BaseLoss):
         self._base_normal_weight = float(loss_config.LAMBDA_NORMAL)
         self._base_depth_smoothness_weight = float(getattr(loss_config, 'LAMBDA_DEPTH_SMOOTHNESS', 0.0))
         self._base_planar_splat_weight = float(loss_config.LAMBDA_PLANAR_SPLAT)
+        self._distortion_alpha_mask_min = float(getattr(loss_config, 'DISTORTION_ALPHA_MASK_MIN', 0.05))
         self._last_geometry_log: dict[str, float] = {}
         self.add_loss_metric('L1_Color', torch.nn.functional.l1_loss, loss_config.LAMBDA_L1)
         self.add_loss_metric('DSSIM_Color', fused_dssim, loss_config.LAMBDA_DSSIM)
@@ -66,6 +67,13 @@ class Faster2DGSLoss(BaseLoss):
         rend_dist = self._render_pkg.get('rend_dist', None)
         if rend_dist is None:
             return self._zero()
+        if self._distortion_alpha_mask_min > 0.0:
+            rend_alpha = self._render_pkg.get('rend_alpha', None)
+            if rend_alpha is not None:
+                mask = rend_alpha.detach() > self._distortion_alpha_mask_min
+                if bool(mask.any().item()):
+                    return rend_dist[mask].mean()
+                return self._zero()
         return rend_dist.mean()
 
     def normal_regularization_loss(self) -> torch.Tensor:

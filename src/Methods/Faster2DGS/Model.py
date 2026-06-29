@@ -1,6 +1,6 @@
 """Faster2DGS/Model.py
 
-2D surfel Gaussians (``Gaussians2D``) with native diff-surfel rasterization (Phase C) or FasterGS bridge fallback.
+2D surfel Gaussians (``Gaussians2D``) with native Faster2DGSCudaBackend surfel rasterization.
 """
 
 import Framework

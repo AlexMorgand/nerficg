@@ -12,7 +12,9 @@ from Methods.Faster2DGS.Faster2DGSCudaBackend import (
     SurfelRasterizerSettings,
     configure_backend,
     diff_rasterize_surfel_with_aux,
+    has_external_surfel_backend,
     has_native_diff_surfel_backend,
+    has_native_surfel_backend,
     has_true_surfel_backend,
 )
 from Methods.Faster2DGS.DiffSurfelBackend.camera_utils import viewspace_normal_to_world
@@ -95,7 +97,7 @@ def _parse_diff_surfel_allmap(
 @Framework.Configurable.configure(
     REQUIRE_TRUE_2DGS_KERNEL=False,
     USE_SURFEL_BACKEND_API=True,
-    USE_DIFF_SURFEL_BACKEND=True,
+    USE_DIFF_SURFEL_BACKEND=False,
     # 2DGS README: depth_ratio=0 (mean) for unbounded/large scenes; 1 (median) for bounded/DTU.
     DEPTH_RATIO=0.0,
     Z_LOG_SCALE_COMPAT=-6.0,
@@ -119,12 +121,19 @@ class Faster2DGSRenderer(FasterGSRenderer):
         if self.REQUIRE_TRUE_2DGS_KERNEL and not has_true_surfel_backend():
             raise Framework.RendererError(
                 'REQUIRE_TRUE_2DGS_KERNEL=True, but no surfel backend was found. '
-                'Install diff-surfel-rasterization or Faster2DGSCudaBackend.'
+                'Build Faster2DGSCudaBackend: python scripts/install.py -m Faster2DGS'
             )
-        if self.USE_DIFF_SURFEL_BACKEND and has_native_diff_surfel_backend():
-            Logger.log_info('Faster2DGS using native diff-surfel rasterizer (Phase C).')
-        elif self.USE_SURFEL_BACKEND_API and has_true_surfel_backend():
-            Logger.log_info('Faster2DGS using Faster2DGSCudaBackend bridge (Phase A).')
+        if has_native_surfel_backend():
+            Logger.log_info('Faster2DGS using native Faster2DGSCudaBackend surfel rasterizer.')
+        elif has_external_surfel_backend():
+            Logger.log_info(
+                'Faster2DGS using external diff-surfel-rasterization (USE_DIFF_SURFEL_BACKEND debug/parity only).'
+            )
+        else:
+            Logger.log_warning(
+                'Faster2DGS falling back to FasterGS 3D bridge — not paper parity. '
+                'Build Faster2DGSCudaBackend: python scripts/install.py -m Faster2DGS'
+            )
 
     def _rasterize_training(
         self,

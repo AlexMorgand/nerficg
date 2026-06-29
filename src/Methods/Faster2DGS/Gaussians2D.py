@@ -13,7 +13,7 @@ from Datasets.utils import BasicPointCloud
 from Logging import Logger
 from Methods.FasterGS.FasterGSCudaBackend import add_noise, relocation_adjustment
 from Methods.FasterGS.Model import Gaussians
-from Optim.adam_utils import extend_param_groups
+from Optim.adam_utils import extend_param_groups, replace_param_group_data
 from Optim.knn_utils import compute_root_mean_squared_knn_distances
 
 # Fixed log-scale for the implicit thin axis (matches Faster2DGSRenderer / surfel bridge).
@@ -24,6 +24,8 @@ class Gaussians2D(Gaussians):
     """Oriented 2D disks: ``(N, 2)`` log-scales + quaternion tangent frame."""
 
     z_log_scale_compat: float = DEFAULT_Z_LOG_SCALE_COMPAT
+    # 3DGS/2DGS default is 0.01; large surfel clouds stay too dark until opacities recover.
+    opacity_reset_max: float = 0.05
 
     @property
     def scales(self) -> torch.Tensor:
@@ -91,6 +93,14 @@ class Gaussians2D(Gaussians):
         self._max_radii2D = torch.zeros(n_initial_gaussians, dtype=torch.float32, device='cuda')
 
     @torch.no_grad()
+    def reset_opacities(self) -> None:
+        """Cap activated opacity at ``opacity_reset_max`` (official 2DGS uses 0.01)."""
+        max_opacity = min(max(float(self.opacity_reset_max), 1e-4), 1.0 - 1e-4)
+        max_logit = math.log(max_opacity / (1.0 - max_opacity))
+        opacities_new = self._opacities.clamp_max(max_logit)
+        replace_param_group_data(self.optimizer, opacities_new, 'opacities')
+
+    @torch.no_grad()
     def update_max_radii2D(self, radii: torch.Tensor) -> None:
         """Track per-Gaussian max screen radius (official 2DGS densify_and_prune)."""
         if self._max_radii2D is None or radii.numel() == 0:
@@ -116,8 +126,13 @@ class Gaussians2D(Gaussians):
         min_opacity: float,
         prune_large_gaussians: bool,
         max_screen_size: float | None = None,
+        *,
+        skip_opacity_prune: bool = False,
     ) -> None:
         """Clone/split with 2DGS-style in-plane sampling (zero extent along local normal)."""
+        # reset_opacities() clamps to ~0.01; culling above that evicts the whole cloud right after 3k.
+        if not skip_opacity_prune:
+            min_opacity = min(float(min_opacity), 0.01)
         n_before = self._means.shape[0]
         densification_mask = self.densification_info[1] >= grad_threshold * self.densification_info[0].clamp_min(1.0)
         is_small = torch.max(self._scales, dim=1).values <= math.log(self.percent_dense * self.training_cameras_extent)
@@ -184,10 +199,20 @@ class Gaussians2D(Gaussians):
         self._filter_3d = None
 
         prune_mask = torch.cat([split_mask, torch.zeros(n_new_gaussians, dtype=torch.bool, device='cuda')])
-        prune_mask |= self._opacities.flatten() < math.log(min_opacity / (1 - min_opacity))
-        prune_mask |= self._rotations.mul(self._rotations).sum(dim=1) < 1e-8
+        opacity_prune = torch.zeros_like(prune_mask)
+        if not skip_opacity_prune:
+            opacity_thresh = math.log(min_opacity / (1 - min_opacity))
+            opacity_prune = self._opacities.flatten() < opacity_thresh
+            prune_mask |= opacity_prune
+        rot_prune = self._rotations.mul(self._rotations).sum(dim=1) < 1e-8
+        prune_mask |= rot_prune
+        prune_mask |= rot_prune
+        world_prune = torch.zeros_like(prune_mask)
+        screen_prune = torch.zeros_like(prune_mask)
         if prune_large_gaussians:
-            prune_mask |= self._scales.max(dim=1).values > math.log(0.1 * self.training_cameras_extent)
+            world_thresh = math.log(0.1 * self.training_cameras_extent)
+            world_prune = self._scales.max(dim=1).values > world_thresh
+            prune_mask |= world_prune
             if max_screen_size is not None and saved_max_radii2D is not None:
                 n_old = saved_max_radii2D.shape[0]
                 if self._max_radii2D.shape[0] == n_old + n_new_gaussians:
@@ -195,8 +220,17 @@ class Gaussians2D(Gaussians):
                         saved_max_radii2D,
                         torch.zeros(n_new_gaussians, device='cuda', dtype=saved_max_radii2D.dtype),
                     ])
-                    prune_mask |= screen_radii > max_screen_size
+                    screen_prune = screen_radii > max_screen_size
+                    prune_mask |= screen_prune
         n_pruned = int(prune_mask.sum().item())
+        self._last_prune_breakdown = {
+            'split_parents': int(split_mask.sum().item()),
+            'opacity': int(opacity_prune.sum().item()),
+            'rotation': int(rot_prune.sum().item()),
+            'world_scale': int(world_prune.sum().item()),
+            'screen_size': int(screen_prune.sum().item()),
+            'total': n_pruned,
+        }
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         self.prune(prune_mask)

@@ -76,7 +76,12 @@ Acceptance:
    - `aux[5]`: median depth
    - `aux[6]`: distortion
 
-**Status (implemented):** Official `diff-surfel-rasterization` submodule + `DiffSurfelBackend` adapter; `USE_DIFF_SURFEL_BACKEND=True` (default in `gs_guitar.yaml`); 7-ch allmap parsing; `DEPTH_RATIO` for mesh/training depth; analytic aux backward via diff-surfel. Legacy `Faster2DGSCudaBackend` bridge remains as fallback when `USE_DIFF_SURFEL_BACKEND=False`.
+**Status (implemented):** Native surfel CUDA kernels vendored into
+`Faster2DGSCudaBackend/surfel_rasterization/` and built with
+`python scripts/install.py -m Faster2DGS`. Default configs use
+`USE_DIFF_SURFEL_BACKEND=false` (no external pip package). Legacy external
+`diff-surfel-rasterization` remains opt-in via `USE_DIFF_SURFEL_BACKEND=true`.
+Old FastGS 3D bridge is last-resort fallback only.
 
 Acceptance:
 - `render_image_inference` returns non-degenerate `rgb/depth/alpha/normal` on trained checkpoint.
@@ -125,10 +130,10 @@ python scripts/run_mip360_2dgs_benchmark.py
 ```
 
 FastGS speed path retained: `FusedAdam`, `fused_dssim`, Morton reordering (5k),
-`expandable_segments`, `PRELOADING_LEVEL=1`, diff-surfel rasterizer (same kernel as official 2DGS).
+`expandable_segments`, `PRELOADING_LEVEL=1`, native Faster2DGSCudaBackend surfel rasterizer.
 
 2DGS parity fixes: official viewspace grad for densify (no pixel scale), opacity cull 0.05,
-screen-size prune, no final opacity prune, official diff-surfel backend.
+screen-size prune, no final opacity prune, native surfel backend (7-ch allmap).
 
 
 ## 3) Tensor Contracts to Lock Before Coding

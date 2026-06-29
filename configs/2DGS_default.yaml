@@ -5,8 +5,8 @@
 #   # edit DATASET.PATH, MODEL_NAME, DATASET_TYPE, and scene preset below
 #   python scripts/train.py -c configs/my_scene.yaml
 #
-# Requires diff-surfel (Phase C):
-#   pip install ./submodules/diff-surfel-rasterization --no-build-isolation
+# Requires Faster2DGSCudaBackend (native surfel rasterizer):
+#   python scripts/install.py -m Faster2DGS
 #
 # Scene presets (2DGS paper / README):
 #   Unbounded (MipNeRF360 outdoor):  DATASET_TYPE: MipNeRF360, DEPTH_RATIO: 0.0, LAMBDA_DISTORTION: 100
@@ -33,7 +33,7 @@ RENDERER:
     FORCE_OPTIMIZED_INFERENCE: false
     REQUIRE_TRUE_2DGS_KERNEL: false
     USE_SURFEL_BACKEND_API: true
-    USE_DIFF_SURFEL_BACKEND: true
+    USE_DIFF_SURFEL_BACKEND: false
     # 0 = mean depth (outdoor / unbounded), 1 = median depth (bounded / mesh export)
     DEPTH_RATIO: 1.0
     Z_LOG_SCALE_COMPAT: -6.0
@@ -76,11 +76,14 @@ TRAINING:
     DENSIFICATION_INTERVAL: 100
     DENSIFICATION_GRAD_THRESHOLD: 0.0002
     DENSIFICATION_PERCENT_DENSE: 0.01
-    DISTORTION_START_ITERATION: 3_000
+    # Opacity reset @3k; distortion @3.5k (photometric recovery gap). Normal @7k per paper.
+    DISTORTION_START_ITERATION: 3_500
     NORMAL_START_ITERATION: 7_000
     DEPTH_SMOOTHNESS_START_ITERATION: 7_000
     PLANAR_SPLAT_START_ITERATION: 7_000
-    GEOMETRY_WARMUP_DURATION: 0
+    GEOMETRY_WARMUP_DURATION: 1_500
+    DISTORTION_PAUSE_AFTER_RESET: 500
+    OPACITY_RESET_MAX: 0.05
     GEOMETRY_LOG_INTERVAL: 10
     USE_MCMC: false
     OPACITY_RESET_INTERVAL: 3_000

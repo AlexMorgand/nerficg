@@ -1,3 +1,11 @@
-from .torch_bindings import diff_rasterize_surfel_with_aux, rasterize_surfel_with_aux, RasterizerSettings
+from .torch_bindings import (
+    SurfelRasterizerSettings,
+    diff_rasterize_surfel_with_aux,
+    rasterize_surfel_with_aux,
+)
 
-__all__ = ['diff_rasterize_surfel_with_aux', 'rasterize_surfel_with_aux', 'RasterizerSettings']
+__all__ = [
+    'SurfelRasterizerSettings',
+    'diff_rasterize_surfel_with_aux',
+    'rasterize_surfel_with_aux',
+]

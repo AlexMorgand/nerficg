@@ -13,9 +13,8 @@ __install_command__ = [
 
 try:
     from Faster2DGSCudaBackend import _C as _backend  # noqa: F401
-    _HAS_LEGACY_SURFEL_EXTENSION = True
-except ImportError:
-    _HAS_LEGACY_SURFEL_EXTENSION = False
+except ImportError as e:
+    raise Framework.ExtensionError(name=__extension_name__, install_command=__install_command__) from e
 
 from .surfel_rasterization import (
     SurfelRasterizerSettings,
@@ -23,6 +22,8 @@ from .surfel_rasterization import (
     diff_rasterize_surfel_with_aux,
     rasterize_surfel_with_aux,
     has_true_surfel_backend,
+    has_native_surfel_backend,
+    has_external_surfel_backend,
     has_native_diff_surfel_backend,
 )
 
@@ -32,5 +33,7 @@ __all__ = [
     'diff_rasterize_surfel_with_aux',
     'rasterize_surfel_with_aux',
     'has_true_surfel_backend',
+    'has_native_surfel_backend',
+    'has_external_surfel_backend',
     'has_native_diff_surfel_backend',
 ]

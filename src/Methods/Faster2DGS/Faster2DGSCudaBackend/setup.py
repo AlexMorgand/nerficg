@@ -1,5 +1,4 @@
 import os
-from glob import glob
 from pathlib import Path
 
 from setuptools import setup
@@ -17,7 +16,7 @@ except ImportError as exc:
     ) from exc
 
 __author__ = 'NeRFICG'
-__description__ = 'CUDA backend scaffold for Faster2DGS surfel rasterization.'
+__description__ = 'Native 2DGS surfel rasterization CUDA backend for Faster2DGS.'
 
 ENABLE_FASTMATH = True
 ENABLE_NVCC_LINEINFO = False
@@ -25,28 +24,29 @@ ENABLE_NVCC_LINEINFO = False
 module_root = Path(__file__).parent.absolute()
 extension_name = module_root.name
 extension_root = module_root / extension_name
-cuda_modules = [d.name for d in Path(extension_root).iterdir() if d.is_dir() and d.name not in ['utils', 'torch_bindings', '__pycache__']]
-fastergs_root = module_root.parent.parent / 'FasterGS' / 'FasterGSCudaBackend' / 'FasterGSCudaBackend'
-fastergs_forward = fastergs_root / 'rasterization' / 'src' / 'forward.cu'
-if not fastergs_forward.is_file():
+surfel_root = extension_root / 'surfel_rasterization'
+repo_root = module_root.parents[3]
+glm_root = repo_root / 'submodules' / 'diff-surfel-rasterization' / 'third_party' / 'glm'
+if not (glm_root / 'glm' / 'glm.hpp').is_file():
     raise SystemExit(
-        'Missing FasterGS CUDA sources required by Faster2DGSCudaBackend.\n'
-        f'Expected file not found: {fastergs_forward}\n'
-        'Ensure src/Methods/FasterGS/FasterGSCudaBackend is present and up to date.'
+        'GLM headers not found for Faster2DGSCudaBackend surfel build.\n'
+        f'Expected: {glm_root / "glm" / "glm.hpp"}\n'
+        'Run: git submodule update --init submodules/diff-surfel-rasterization/third_party/glm'
     )
 
-sources = [str(extension_root / 'torch_bindings' / 'bindings.cpp')]
-for module in cuda_modules:
-    sources += glob(str(extension_root / module / 'src' / '**' / '*.cpp'), recursive=True)
-    sources += glob(str(extension_root / module / 'src' / '**' / '*.cu'), recursive=True)
-
-# FasterGS headers first so `#include "rasterization_api.h"` in embedded sources resolves to FasterGS.
-include_dirs = [
-    str(fastergs_root / 'rasterization' / 'include'),
-    str(fastergs_root / 'utils'),
+sources = [
+    str(extension_root / 'torch_bindings' / 'bindings.cpp'),
+    str(surfel_root / 'surfel_rasterize_points.cu'),
+    str(surfel_root / 'cuda_rasterizer' / 'forward.cu'),
+    str(surfel_root / 'cuda_rasterizer' / 'backward.cu'),
+    str(surfel_root / 'cuda_rasterizer' / 'rasterizer_impl.cu'),
 ]
-for module in cuda_modules:
-    include_dirs.append(str(extension_root / module / 'include'))
+
+include_dirs = [
+    str(surfel_root),
+    str(surfel_root / 'cuda_rasterizer'),
+    str(glm_root),
+]
 
 cxx_flags = ['/std:c++17' if os.name == 'nt' else '-std=c++17']
 nvcc_flags = ['-std=c++17']
@@ -63,8 +63,8 @@ extension = CUDAExtension(
     include_dirs=include_dirs,
     extra_compile_args={
         'cxx': cxx_flags,
-        'nvcc': nvcc_flags
-    }
+        'nvcc': nvcc_flags,
+    },
 )
 
 setup(
@@ -73,5 +73,5 @@ setup(
     packages=[f'{extension_name}.torch_bindings'],
     ext_modules=[extension],
     description=__description__,
-    cmdclass={'build_ext': BuildExtension}
+    cmdclass={'build_ext': BuildExtension},
 )
