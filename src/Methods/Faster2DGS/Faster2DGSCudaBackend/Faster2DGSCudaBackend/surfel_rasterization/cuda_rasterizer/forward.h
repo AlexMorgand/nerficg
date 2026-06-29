@@ -69,7 +69,8 @@ namespace FORWARD
 		float2* bucket_aux_m,
 		const float* bg_color,
 		float* out_color,
-		float* out_others);
+		float* out_others,
+		bool photometric_only = false);
 }
 
 

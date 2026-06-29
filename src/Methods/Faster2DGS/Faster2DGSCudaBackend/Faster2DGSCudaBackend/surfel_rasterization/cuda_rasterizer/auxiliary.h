@@ -14,6 +14,8 @@
 #define NUM_WARPS (BLOCK_SIZE/32)
 
 #define TIGHTBBOX 0
+// Experimental: circle–tile intersection under-counts surfel tiles vs the AABB rect (quality loss).
+#define SURFEL_TILE_CIRCLE_CULL 0
 #define RENDER_AXUTILITY 1
 #define DEPTH_OFFSET 0
 #define ALPHA_OFFSET 1
@@ -69,6 +71,34 @@ __forceinline__ __device__ void getRect(const float2 p, int max_radius, uint2& r
 		min(grid.x, max((int)0, (int)((p.x + max_radius + BLOCK_X - 1) / BLOCK_X))),
 		min(grid.y, max((int)0, (int)((p.y + max_radius + BLOCK_Y - 1) / BLOCK_Y)))
 	};
+}
+
+// StopThePop-lite for surfels: count tiles whose 16×16 block intersects the splat disc.
+__forceinline__ __device__ uint count_touched_tiles_circle(
+	const float2 center,
+	const float radius,
+	const uint2 rect_min,
+	const uint2 rect_max)
+{
+	const float r2 = radius * radius;
+	uint count = 0;
+	for (uint ty = rect_min.y; ty < rect_max.y; ty++)
+	{
+		const float tile_y0 = static_cast<float>(ty * BLOCK_Y);
+		const float tile_y1 = tile_y0 + static_cast<float>(BLOCK_Y - 1);
+		for (uint tx = rect_min.x; tx < rect_max.x; tx++)
+		{
+			const float tile_x0 = static_cast<float>(tx * BLOCK_X);
+			const float tile_x1 = tile_x0 + static_cast<float>(BLOCK_X - 1);
+			const float cx = fminf(fmaxf(center.x, tile_x0), tile_x1);
+			const float cy = fminf(fmaxf(center.y, tile_y0), tile_y1);
+			const float dx = center.x - cx;
+			const float dy = center.y - cy;
+			if (dx * dx + dy * dy <= r2)
+				count++;
+		}
+	}
+	return count;
 }
 
 __forceinline__ __device__ float3 transformPoint4x3(const float3& p, const float* matrix)

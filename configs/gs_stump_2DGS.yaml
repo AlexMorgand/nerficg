@@ -43,7 +43,7 @@ TRAINING:
     WANDB:
         ACTIVATE: false
     GUI:
-        ACTIVATE: true
+        ACTIVATE: false
         RENDER_INTERVAL: 5
         SKIP_GUI_SETUP: true
 

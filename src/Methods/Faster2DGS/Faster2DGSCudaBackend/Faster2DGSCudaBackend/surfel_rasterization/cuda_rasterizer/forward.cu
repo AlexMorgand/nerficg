@@ -242,7 +242,11 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	radii[idx] = (int)radius;
 	points_xy_image[idx] = point_image;
 	normal_opacity[idx] = {normal.x, normal.y, normal.z, opacities[idx]};
+#if SURFEL_TILE_CIRCLE_CULL
+	tiles_touched[idx] = count_touched_tiles_circle(point_image, static_cast<float>(radius), rect_min, rect_max);
+#else
 	tiles_touched[idx] = (rect_max.y - rect_min.y) * (rect_max.x - rect_min.x);
+#endif
 }
 
 // Main rasterization method. Collaboratively works on one tile per
@@ -250,7 +254,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 // 7-channel aux, with FastGS-style per-bucket (32 primitive) checkpoints
 // of the running accumulators (color, T, depth, normal, M1, M2) so the
 // backward can be done bucket-parallel instead of per-tile serial.
-template <uint32_t CHANNELS>
+template <uint32_t CHANNELS, bool ACCUMULATE_AUX>
 __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
 renderCUDA(
 	const uint2* __restrict__ ranges,
@@ -319,7 +323,6 @@ renderCUDA(
 	uint32_t last_contributor = 0;
 	float C[CHANNELS] = { 0 };
 
-#if RENDER_AXUTILITY
 	float N[3] = {0};
 	float D = { 0 };
 	float M1 = {0};
@@ -327,7 +330,6 @@ renderCUDA(
 	float distortion = {0};
 	float median_depth = {0};
 	uint32_t median_contributor = 0; // 0 = none; otherwise 1-based contributor index
-#endif
 
 	// running count of primitives this pixel-thread has stepped through (for bucket checkpoint)
 	uint32_t bucket_count = 0;
@@ -363,8 +365,10 @@ renderCUDA(
 			{
 				const uint32_t slot = bucket_offset * BLOCK_SIZE + thread_rank;
 				bucket_color_T[slot] = make_float4(C[0], C[1], C[2], T);
-				bucket_aux_dn[slot] = make_float4(D, N[0], N[1], N[2]);
-				bucket_aux_m[slot] = make_float2(M1, M2);
+				if constexpr (ACCUMULATE_AUX) {
+					bucket_aux_dn[slot] = make_float4(D, N[0], N[1], N[2]);
+					bucket_aux_m[slot] = make_float2(M1, M2);
+				}
 				bucket_offset++;
 			}
 			bucket_count++;
@@ -410,20 +414,20 @@ renderCUDA(
 			}
 
 			float w = alpha * T;
-#if RENDER_AXUTILITY
-			float A = 1-T;
-			float m = far_n / (far_n - near_n) * (1 - near_n / depth);
-			distortion += (m * m * A + M2 - 2 * m * M1) * w;
-			D  += depth * w;
-			M1 += m * w;
-			M2 += m * m * w;
+			if constexpr (ACCUMULATE_AUX) {
+				float A = 1-T;
+				float m = far_n / (far_n - near_n) * (1 - near_n / depth);
+				distortion += (m * m * A + M2 - 2 * m * M1) * w;
+				D  += depth * w;
+				M1 += m * w;
+				M2 += m * m * w;
 
-			if (T > 0.5) {
-				median_depth = depth;
-				median_contributor = contributor; // 1-based
+				if (T > 0.5) {
+					median_depth = depth;
+					median_contributor = contributor; // 1-based
+				}
+				for (int ch=0; ch<3; ch++) N[ch] += normal[ch] * w;
 			}
-			for (int ch=0; ch<3; ch++) N[ch] += normal[ch] * w;
-#endif
 
 			for (int ch = 0; ch < CHANNELS; ch++)
 				C[ch] += features[collected_id[j] * CHANNELS + ch] * w;
@@ -444,20 +448,22 @@ renderCUDA(
 	if (inside)
 	{
 		final_T[pix_id] = T;
-		final_M1[pix_id] = M1;
-		final_M2[pix_id] = M2;
+		if constexpr (ACCUMULATE_AUX) {
+			final_M1[pix_id] = M1;
+			final_M2[pix_id] = M2;
+		}
 		n_contrib[pix_id] = last_contributor;
 		for (int ch = 0; ch < CHANNELS; ch++)
 			out_color[ch * n_pixels + pix_id] = C[ch] + T * bg_color[ch];
 
-#if RENDER_AXUTILITY
-		median_contrib[pix_id] = median_contributor;
-		out_others[pix_id + DEPTH_OFFSET * n_pixels] = D;
-		out_others[pix_id + ALPHA_OFFSET * n_pixels] = 1 - T;
-		for (int ch=0; ch<3; ch++) out_others[pix_id + (NORMAL_OFFSET+ch) * n_pixels] = N[ch];
-		out_others[pix_id + MIDDEPTH_OFFSET * n_pixels] = median_depth;
-		out_others[pix_id + DISTORTION_OFFSET * n_pixels] = distortion;
-#endif
+		if constexpr (ACCUMULATE_AUX) {
+			median_contrib[pix_id] = median_contributor;
+			out_others[pix_id + DEPTH_OFFSET * n_pixels] = D;
+			out_others[pix_id + ALPHA_OFFSET * n_pixels] = 1 - T;
+			for (int ch=0; ch<3; ch++) out_others[pix_id + (NORMAL_OFFSET+ch) * n_pixels] = N[ch];
+			out_others[pix_id + MIDDEPTH_OFFSET * n_pixels] = median_depth;
+			out_others[pix_id + DISTORTION_OFFSET * n_pixels] = distortion;
+		}
 	}
 }
 
@@ -485,32 +491,60 @@ void FORWARD::render(
 	float2* bucket_aux_m,
 	const float* bg_color,
 	float* out_color,
-	float* out_others)
+	float* out_others,
+	bool photometric_only)
 {
-	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
-		ranges,
-		point_list,
-		W, H,
-		focal_x, focal_y,
-		means2D,
-		colors,
-		transMats,
-		depths,
-		normal_opacity,
-		tile_bucket_offsets,
-		final_T,
-		final_M1,
-		final_M2,
-		n_contrib,
-		median_contrib,
-		max_contrib,
-		bucket_tile_index,
-		bucket_color_T,
-		bucket_aux_dn,
-		bucket_aux_m,
-		bg_color,
-		out_color,
-		out_others);
+	if (photometric_only) {
+		renderCUDA<NUM_CHANNELS, false> << <grid, block >> > (
+			ranges,
+			point_list,
+			W, H,
+			focal_x, focal_y,
+			means2D,
+			colors,
+			transMats,
+			depths,
+			normal_opacity,
+			tile_bucket_offsets,
+			final_T,
+			final_M1,
+			final_M2,
+			n_contrib,
+			median_contrib,
+			max_contrib,
+			bucket_tile_index,
+			bucket_color_T,
+			bucket_aux_dn,
+			bucket_aux_m,
+			bg_color,
+			out_color,
+			out_others);
+	} else {
+		renderCUDA<NUM_CHANNELS, true> << <grid, block >> > (
+			ranges,
+			point_list,
+			W, H,
+			focal_x, focal_y,
+			means2D,
+			colors,
+			transMats,
+			depths,
+			normal_opacity,
+			tile_bucket_offsets,
+			final_T,
+			final_M1,
+			final_M2,
+			n_contrib,
+			median_contrib,
+			max_contrib,
+			bucket_tile_index,
+			bucket_color_T,
+			bucket_aux_dn,
+			bucket_aux_m,
+			bg_color,
+			out_color,
+			out_others);
+	}
 }
 
 void FORWARD::preprocess(int P, int D, int M,

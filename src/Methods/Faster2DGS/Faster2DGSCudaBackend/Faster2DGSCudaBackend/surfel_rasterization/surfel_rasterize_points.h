@@ -30,7 +30,8 @@ RasterizeGaussiansCUDA(
 	const int degree,
 	const torch::Tensor& campos,
 	const bool prefiltered,
-	const bool debug);
+	const bool debug,
+	const bool photometric_only);
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
  RasterizeGaussiansBackwardCUDA(

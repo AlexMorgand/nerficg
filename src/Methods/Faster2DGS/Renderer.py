@@ -84,6 +84,7 @@ class Faster2DGSRenderer(FasterGSRenderer):
         bg_color: torch.Tensor,
         scale_modifier: float = 1.0,
         uniform_opacity: float | None = None,
+        photometric_only: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         settings = extract_settings(view, self.model.gaussians.active_sh_bases, bg_color, self.PROPER_ANTIALIASING)
         rgb, auxiliary_maps, radii = diff_rasterize_surfel_with_aux(
@@ -98,6 +99,7 @@ class Faster2DGSRenderer(FasterGSRenderer):
             view=view,
             scale_modifier=scale_modifier,
             uniform_opacity=uniform_opacity,
+            photometric_only=photometric_only,
         )
         self._last_training_radii = radii
         return rgb, auxiliary_maps
@@ -137,10 +139,13 @@ class Faster2DGSRenderer(FasterGSRenderer):
             return out_chw
         return {k: v.permute(1, 2, 0) for k, v in out_chw.items()}
 
-    def render_image_training(self, view: View, update_densification_info: bool, bg_color: torch.Tensor) -> dict[str, torch.Tensor]:
-        rgb, auxiliary_maps = self._rasterize_training(view, update_densification_info, bg_color)
-        parsed = self._training_outputs_from_aux(view, auxiliary_maps)
-        out = {'rgb': rgb, **parsed}
+    def render_image_training(self, view: View, update_densification_info: bool, bg_color: torch.Tensor, *, photometric_only: bool = False) -> dict[str, torch.Tensor]:
+        rgb, auxiliary_maps = self._rasterize_training(view, update_densification_info, bg_color, photometric_only=photometric_only)
+        if photometric_only:
+            out = {'rgb': rgb}
+        else:
+            parsed = self._training_outputs_from_aux(view, auxiliary_maps)
+            out = {'rgb': rgb, **parsed}
         if update_densification_info and hasattr(self, '_last_training_radii'):
             out['radii'] = self._last_training_radii
         return out

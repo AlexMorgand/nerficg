@@ -245,16 +245,24 @@ def profile_step(trainer, dataset, iteration: int, repeats: int, warmup: int) ->
         _accum('sample_view', t_sample.ms)
 
         renderer = trainer.renderer
+        photometric_only = not trainer._needs_aux_maps(iteration)
         with CudaTimer() as t_rast:
-            rgb, auxiliary_maps = renderer._rasterize_training(view_i, update_dens, bg_i)
+            rgb, auxiliary_maps = renderer._rasterize_training(
+                view_i, update_dens, bg_i, photometric_only=photometric_only,
+            )
         _accum('rasterize_fwd', t_rast.ms)
 
-        with CudaTimer() as t_aux:
-            parsed = renderer._training_outputs_from_aux(view_i, auxiliary_maps)
-            render_pkg = {'rgb': rgb, **parsed}
+        if photometric_only:
+            render_pkg = {'rgb': rgb}
             if update_dens and hasattr(renderer, '_last_training_radii'):
                 render_pkg['radii'] = renderer._last_training_radii
-        _accum('aux_parse', t_aux.ms)
+        else:
+            with CudaTimer() as t_aux:
+                parsed = renderer._training_outputs_from_aux(view_i, auxiliary_maps)
+                render_pkg = {'rgb': rgb, **parsed}
+                if update_dens and hasattr(renderer, '_last_training_radii'):
+                    render_pkg['radii'] = renderer._last_training_radii
+            _accum('aux_parse', t_aux.ms)
 
         rgb_gt = view_i.rgb
         if (supervision_alpha := get_supervision_alpha(view_i)) is not None:

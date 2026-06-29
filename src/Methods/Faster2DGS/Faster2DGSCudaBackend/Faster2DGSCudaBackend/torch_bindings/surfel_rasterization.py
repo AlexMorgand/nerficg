@@ -39,6 +39,7 @@ class SurfelRasterizerSettings(NamedTuple):
     campos: torch.Tensor
     prefiltered: bool = False
     debug: bool = False
+    photometric_only: bool = False
 
 
 def _pack_sh(
@@ -82,6 +83,7 @@ def _build_settings(
     rasterizer_settings: NerficgRasterizerSettings,
     view,
     scale_modifier: float,
+    photometric_only: bool = False,
 ) -> SurfelRasterizerSettings:
     world_view_transform, full_proj_transform, campos, tanfovx, tanfovy = build_surfel_camera(view)
     sh_degree = max(0, int(round(rasterizer_settings.active_sh_bases ** 0.5)) - 1)
@@ -96,6 +98,7 @@ def _build_settings(
         projmatrix=full_proj_transform,
         sh_degree=sh_degree,
         campos=campos,
+        photometric_only=photometric_only,
     )
 
 
@@ -132,6 +135,7 @@ class _RasterizeSurfels(torch.autograd.Function):
             settings.campos,
             settings.prefiltered,
             settings.debug,
+            settings.photometric_only,
         )
         ctx.settings = settings
         ctx.num_rendered = num_rendered
@@ -211,10 +215,11 @@ def diff_rasterize_surfel_with_aux(
     view,
     scale_modifier: float = 1.0,
     uniform_opacity: float | None = None,
+    photometric_only: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if view is None:
         raise ValueError('view is required for native surfel rasterization')
-    settings = _build_settings(rasterizer_settings, view, scale_modifier)
+    settings = _build_settings(rasterizer_settings, view, scale_modifier, photometric_only)
     sh = _pack_sh(sh_coefficients_0, sh_coefficients_rest, rasterizer_settings.active_sh_bases)
     scales_2d = raw_scales_2d.exp()
     rots = torch.nn.functional.normalize(rotations, dim=-1)

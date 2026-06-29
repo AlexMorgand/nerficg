@@ -120,6 +120,30 @@ class Gaussians2D(Gaussians):
             self._max_radii2D = self._max_radii2D[ordering].contiguous()
         super().sort(ordering)
 
+    @torch.no_grad()
+    def prune_to_budget(self, target: int) -> int:
+        """Drop lowest-importance splats until count <= ``target``.
+
+        Keeps high-opacity, screen-visible splats — avoids the old opacity/scale heuristic
+        that removed large surfels needed for coverage.
+        """
+        n = self._means.shape[0]
+        if n <= target:
+            return 0
+        opacity = self.opacities.flatten()
+        if self._max_radii2D is not None and self._max_radii2D.shape[0] == n:
+            screen = self._max_radii2D
+            screen_norm = screen / screen.max().clamp_min(1.0)
+        else:
+            screen_norm = torch.zeros(n, device=opacity.device, dtype=opacity.dtype)
+        importance = opacity * (1.0 + screen_norm)
+        keep_idx = importance.topk(target, largest=True).indices
+        prune_mask = torch.ones(n, dtype=torch.bool, device=self._means.device)
+        prune_mask[keep_idx] = False
+        n_pruned = int(prune_mask.sum().item())
+        self.prune(prune_mask)
+        return n_pruned
+
     def adaptive_density_control(
         self,
         grad_threshold: float,

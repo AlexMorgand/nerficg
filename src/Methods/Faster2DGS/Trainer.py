@@ -25,8 +25,7 @@ from Methods.FasterGS.Trainer import FasterGSTrainer
     SKIP_FINAL_OPACITY_PRUNE=True,
     # Ramp distortion after each opacity-reset pause (smoothstep per reset cycle).
     GEOMETRY_WARMUP_DURATION=1_500,
-    # After distortion starts, skip opacity cull during densify (λ_d suppresses opacity on large
-    # clouds; world/screen/split pruning still runs). Disable to match official 0.05 cull.
+    # After distortion starts, briefly skip opacity cull right after each opacity reset only.
     OPACITY_CULL_GRACE_AFTER_RESET=True,
     # Softer reset than 3DGS 0.01 — large surfel counts need higher floor to avoid a dark spell.
     OPACITY_RESET_MAX=0.05,
@@ -34,6 +33,13 @@ from Methods.FasterGS.Trainer import FasterGSTrainer
     DISTORTION_PAUSE_AFTER_RESET=500,
     # Scale λ_d down when splat count exceeds official ~400k at 3k (avoids opacity crush).
     SPLAT_COUNT_DISTORTION_REFERENCE=400_000,
+    # Optional splat budget (off by default — quality follows official densify; speed from photometric fast paths).
+    # Set SPLAT_BUDGET_TARGET > 0 for soft grad scaling; SPLAT_BUDGET_HARD_CAP > 0 for emergency hard prune.
+    USE_SPLAT_BUDGET=False,
+    SPLAT_BUDGET_TARGET=0,
+    SPLAT_BUDGET_HARD_CAP=0,
+    SPLAT_BUDGET_START_ITERATION=1_500,
+    SPLAT_BUDGET_GRAD_SCALE_MAX=2.0,
     LOSS=Framework.ConfigParameterList(
         LAMBDA_L1=0.8,
         LAMBDA_DSSIM=0.2,
@@ -60,9 +66,12 @@ class Faster2DGSTrainer(FasterGSTrainer):
         return t * t * (3.0 - 2.0 * t)
 
     def _skip_densify_opacity_cull(self, iteration: int) -> bool:
+        """Skip opacity cull only briefly after each opacity reset while opacities recover."""
         if not self.OPACITY_CULL_GRACE_AFTER_RESET:
             return False
-        return self.DISTORTION_START_ITERATION < iteration <= self.DENSIFICATION_END_ITERATION
+        if iteration <= self.DISTORTION_START_ITERATION:
+            return False
+        return self._since_last_opacity_reset(iteration) <= self.DISTORTION_PAUSE_AFTER_RESET
 
     def _since_last_opacity_reset(self, iteration: int) -> int:
         """Iterations since the latest periodic opacity reset (0 on the reset iteration)."""
@@ -97,6 +106,42 @@ class Faster2DGSTrainer(FasterGSTrainer):
             self.model.gaussians.opacity_reset_max = float(self.OPACITY_RESET_MAX)
         self.loss = Faster2DGSLoss(loss_config=self.LOSS, model=self.model)
 
+    def _needs_aux_maps(self, iteration: int) -> bool:
+        if self._distortion_scale(iteration) > 0.0:
+            return True
+        if self._warmup_scale(iteration, self.NORMAL_START_ITERATION) > 0.0:
+            return True
+        if self._warmup_scale(iteration, self.DEPTH_SMOOTHNESS_START_ITERATION) > 0.0:
+            return True
+        if self._warmup_scale(iteration, self.PLANAR_SPLAT_START_ITERATION) > 0.0:
+            return True
+        return False
+
+    def _effective_densification_grad_threshold(self, iteration: int) -> float:
+        """Optionally raise grad bar above budget target (disabled when USE_SPLAT_BUDGET=False)."""
+        base = float(self.DENSIFICATION_GRAD_THRESHOLD)
+        if not self.USE_SPLAT_BUDGET:
+            return base
+        target = int(self.SPLAT_BUDGET_TARGET)
+        if target <= 0 or iteration < self.SPLAT_BUDGET_START_ITERATION:
+            return base
+        n = self.model.gaussians.means.shape[0]
+        if n <= target:
+            return base
+        ratio = min(float(self.SPLAT_BUDGET_GRAD_SCALE_MAX), (n / float(target)) ** 0.5)
+        return base * ratio
+
+    def _enforce_splat_budget(self, iteration: int) -> int:
+        if not self.USE_SPLAT_BUDGET:
+            return 0
+        hard_cap = int(self.SPLAT_BUDGET_HARD_CAP)
+        if hard_cap <= 0 or iteration < self.SPLAT_BUDGET_START_ITERATION:
+            return 0
+        g = self.model.gaussians
+        if not hasattr(g, 'prune_to_budget') or g.means.shape[0] <= hard_cap:
+            return 0
+        return g.prune_to_budget(hard_cap)
+
     @training_callback(priority=80)
     def training_iteration(self, iteration: int, dataset: 'BaseDataset') -> None:
         self.model.train()
@@ -115,6 +160,7 @@ class Faster2DGSTrainer(FasterGSTrainer):
             view=view,
             update_densification_info=not self.USE_MCMC and iteration < self.DENSIFICATION_END_ITERATION,
             bg_color=bg_color,
+            photometric_only=not self._needs_aux_maps(iteration),
         )
         rgb_gt = view.rgb
         if (supervision_alpha := get_supervision_alpha(view)) is not None:
@@ -165,12 +211,13 @@ class Faster2DGSTrainer(FasterGSTrainer):
                 torch.cuda.empty_cache()
             skip_opacity_prune = self._skip_densify_opacity_cull(iteration)
             self.model.gaussians.adaptive_density_control(
-                self.DENSIFICATION_GRAD_THRESHOLD,
+                self._effective_densification_grad_threshold(iteration),
                 self.DENSIFICATION_OPACITY_CULL,
                 iteration > self.OPACITY_RESET_INTERVAL,
                 max_screen_size=max_screen_size,
                 skip_opacity_prune=skip_opacity_prune,
             )
+            budget_pruned = self._enforce_splat_budget(iteration)
             stats = getattr(self.model.gaussians, '_last_densify_stats', None)
             breakdown = getattr(self.model.gaussians, '_last_prune_breakdown', None)
             if stats is not None:
@@ -186,6 +233,8 @@ class Faster2DGSTrainer(FasterGSTrainer):
                         f'opacity={breakdown["opacity"]:,}, screen={breakdown["screen_size"]:,}, '
                         f'world={breakdown["world_scale"]:,}, rot={breakdown["rotation"]:,}]'
                     )
+                if budget_pruned > 0:
+                    msg += f' [budget: -{budget_pruned:,} -> {self.model.gaussians.means.shape[0]:,}]'
                 Logger.log_info(msg)
             if iteration < self.DENSIFICATION_END_ITERATION:
                 self.model.gaussians.reset_densification_info()
