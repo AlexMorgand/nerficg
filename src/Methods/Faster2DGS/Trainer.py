@@ -12,30 +12,19 @@ from Methods.FasterGS.Trainer import FasterGSTrainer
 
 
 @Framework.Configurable.configure(
-    # Distortion starts after opacity reset + recovery (official 2DGS uses 3k for both; large clouds need gap).
-    DISTORTION_START_ITERATION=3_500,
+    # Official 2DGS train.py: lambda_dist when iteration > 3000, lambda_normal when iteration > 7000.
+    DISTORTION_START_ITERATION=3_000,
     NORMAL_START_ITERATION=7_000,
     DEPTH_SMOOTHNESS_START_ITERATION=7_000,
     PLANAR_SPLAT_START_ITERATION=7_000,
     GEOMETRY_LOG_INTERVAL=10,
-    # Match FastGS / pre-parity behavior; official 2DGS uses 0.05 but that culls all
-    # surfels still at the 0.01 opacity-reset floor unless counts stay low (~400k not 1.6M).
-    # Official 2DGS densify_and_prune uses min_opacity=0.05 (with opacity_reset=0.01).
+    # Official densify_from_iter=500 but first densify at 600 (iteration > densify_from_iter).
+    DENSIFICATION_START_ITERATION=500,
     DENSIFICATION_OPACITY_CULL=0.05,
     DENSIFICATION_MAX_SCREEN_SIZE=20,
     SKIP_FINAL_OPACITY_PRUNE=True,
-    # Ramp distortion after each opacity-reset pause (smoothstep per reset cycle).
-    GEOMETRY_WARMUP_DURATION=1_500,
-    # After distortion starts, briefly skip opacity cull right after each opacity reset only.
-    OPACITY_CULL_GRACE_AFTER_RESET=True,
-    # Match official 2DGS opacity_reset_interval (min(α, 0.01)).
     OPACITY_RESET_MAX=0.01,
-    # Photometric-only recovery after each periodic opacity reset before distortion ramps again.
-    DISTORTION_PAUSE_AFTER_RESET=500,
-    # Scale λ_d down when splat count exceeds official ~400k at 3k (avoids opacity crush).
-    SPLAT_COUNT_DISTORTION_REFERENCE=400_000,
-    # Optional splat budget (off by default — quality follows official densify; speed from photometric fast paths).
-    # Set SPLAT_BUDGET_TARGET > 0 for soft grad scaling; SPLAT_BUDGET_HARD_CAP > 0 for emergency hard prune.
+    # Optional splat budget (off by default).
     USE_SPLAT_BUDGET=False,
     SPLAT_BUDGET_TARGET=0,
     SPLAT_BUDGET_HARD_CAP=0,
@@ -44,10 +33,8 @@ from Methods.FasterGS.Trainer import FasterGSTrainer
     LOSS=Framework.ConfigParameterList(
         LAMBDA_L1=0.8,
         LAMBDA_DSSIM=0.2,
-        # 2DGS paper: α=100 (unbounded) / 1000 (bounded) for L_d, β=0.05 for L_n; code defaults 0 — set in yaml.
         LAMBDA_DISTORTION=0.0,
-        # Ignore near-empty pixels when averaging distortion (background stays out of L_d).
-        DISTORTION_ALPHA_MASK_MIN=0.05,
+        DISTORTION_ALPHA_MASK_MIN=0.0,
         LAMBDA_NORMAL=0.05,
         LAMBDA_DEPTH_SMOOTHNESS=0.0,
         LAMBDA_PLANAR_SPLAT=0.0,
@@ -56,47 +43,23 @@ from Methods.FasterGS.Trainer import FasterGSTrainer
     ),
 )
 class Faster2DGSTrainer(FasterGSTrainer):
-    """Trainer with 2DGS regularization hooks."""
+    """Trainer with 2DGS regularization hooks matching official train.py loop order."""
 
-    def _warmup_scale(self, iteration: int, start_iteration: int) -> float:
-        if iteration <= start_iteration:
-            return 0.0
-        if self.GEOMETRY_WARMUP_DURATION <= 0:
-            return 1.0
-        t = min(1.0, (iteration - start_iteration) / float(self.GEOMETRY_WARMUP_DURATION))
-        return t * t * (3.0 - 2.0 * t)
-
-    def _skip_densify_opacity_cull(self, iteration: int) -> bool:
-        """Skip opacity cull only briefly after each opacity reset while opacities recover."""
-        if not self.OPACITY_CULL_GRACE_AFTER_RESET:
-            return False
-        if iteration <= self.DISTORTION_START_ITERATION:
-            return False
-        return self._since_last_opacity_reset(iteration) <= self.DISTORTION_PAUSE_AFTER_RESET
-
-    def _since_last_opacity_reset(self, iteration: int) -> int:
-        """Iterations since the latest periodic opacity reset (0 on the reset iteration)."""
-        return iteration % self.OPACITY_RESET_INTERVAL
+    def _geometry_active(self, iteration: int, start_iteration: int) -> bool:
+        """Match official ``train.py``: loss weight is zero until ``iteration > start``."""
+        return iteration > start_iteration
 
     def _distortion_scale(self, iteration: int) -> float:
-        """Distortion weight scale — paused after each opacity reset, then smoothstep ramp."""
-        if iteration < self.DISTORTION_START_ITERATION:
-            return 0.0
-        since_reset = self._since_last_opacity_reset(iteration)
-        if since_reset <= self.DISTORTION_PAUSE_AFTER_RESET:
-            return 0.0
-        if self.GEOMETRY_WARMUP_DURATION <= 0:
-            ramp = 1.0
-        else:
-            ramp_elapsed = since_reset - self.DISTORTION_PAUSE_AFTER_RESET
-            t = min(1.0, ramp_elapsed / float(self.GEOMETRY_WARMUP_DURATION))
-            ramp = t * t * (3.0 - 2.0 * t)
-        ref = int(self.SPLAT_COUNT_DISTORTION_REFERENCE)
-        if ref > 0:
-            n_gaussians = self.model.gaussians.means.shape[0]
-            if n_gaussians > ref:
-                ramp *= ref / float(n_gaussians)
-        return ramp
+        return 1.0 if self._geometry_active(iteration, self.DISTORTION_START_ITERATION) else 0.0
+
+    def _normal_scale(self, iteration: int) -> float:
+        return 1.0 if self._geometry_active(iteration, self.NORMAL_START_ITERATION) else 0.0
+
+    def _depth_smoothness_scale(self, iteration: int) -> float:
+        return 1.0 if self._geometry_active(iteration, self.DEPTH_SMOOTHNESS_START_ITERATION) else 0.0
+
+    def _planar_splat_scale(self, iteration: int) -> float:
+        return 1.0 if self._geometry_active(iteration, self.PLANAR_SPLAT_START_ITERATION) else 0.0
 
     @pre_training_callback(priority=40)
     @torch.no_grad()
@@ -110,13 +73,31 @@ class Faster2DGSTrainer(FasterGSTrainer):
     def _needs_aux_maps(self, iteration: int) -> bool:
         if self._distortion_scale(iteration) > 0.0:
             return True
-        if self._warmup_scale(iteration, self.NORMAL_START_ITERATION) > 0.0:
+        if self._normal_scale(iteration) > 0.0:
             return True
-        if self._warmup_scale(iteration, self.DEPTH_SMOOTHNESS_START_ITERATION) > 0.0:
+        if self._depth_smoothness_scale(iteration) > 0.0:
             return True
-        if self._warmup_scale(iteration, self.PLANAR_SPLAT_START_ITERATION) > 0.0:
+        if self._planar_splat_scale(iteration) > 0.0:
             return True
         return False
+
+    def _should_densify(self, iteration: int) -> bool:
+        return (
+            not self.USE_MCMC
+            and iteration > self.DENSIFICATION_START_ITERATION
+            and iteration < self.DENSIFICATION_END_ITERATION
+            and iteration % self.DENSIFICATION_INTERVAL == 0
+        )
+
+    def _should_reset_opacities(self, iteration: int, dataset: 'BaseDataset') -> bool:
+        if self.USE_MCMC:
+            return False
+        if iteration % self.OPACITY_RESET_INTERVAL == 0:
+            return True
+        return (
+            iteration == self.EXTRA_OPACITY_RESET_ITERATION
+            and dataset.default_camera.background_color.sum() != 0.0
+        )
 
     def _effective_densification_grad_threshold(self, iteration: int) -> float:
         """Optionally raise grad bar above budget target (disabled when USE_SPLAT_BUDGET=False)."""
@@ -143,61 +124,23 @@ class Faster2DGSTrainer(FasterGSTrainer):
             return 0
         return g.prune_to_budget(hard_cap)
 
-    @training_callback(priority=80)
-    def training_iteration(self, iteration: int, dataset: 'BaseDataset') -> None:
-        self.model.train()
-        dataset.train()
-        self.loss.train()
-        self.model.gaussians.update_learning_rate(iteration + 1)
-        self.loss.set_geometry_loss_weights(
-            distortion_scale=self._distortion_scale(iteration),
-            normal_scale=self._warmup_scale(iteration, self.NORMAL_START_ITERATION),
-            depth_smoothness_scale=self._warmup_scale(iteration, self.DEPTH_SMOOTHNESS_START_ITERATION),
-            planar_splat_scale=self._warmup_scale(iteration, self.PLANAR_SPLAT_START_ITERATION),
-        )
-        view = self.train_sampler.get(dataset=dataset)['view']
-        bg_color = torch.rand_like(view.camera.background_color) if self.USE_RANDOM_BACKGROUND_COLOR else view.camera.background_color
-        render_pkg = self.renderer.render_image_training(
-            view=view,
-            update_densification_info=not self.USE_MCMC and iteration < self.DENSIFICATION_END_ITERATION,
-            bg_color=bg_color,
-            photometric_only=not self._needs_aux_maps(iteration),
-        )
-        rgb_gt = view.rgb
-        if (supervision_alpha := get_supervision_alpha(view)) is not None:
-            rgb_gt = apply_background_color(rgb_gt, supervision_alpha, bg_color)
-        loss = self.loss(render_pkg, rgb_gt)
-        loss.backward()
-        self.model.gaussians.optimizer.step()
-        self.model.gaussians.optimizer.zero_grad(set_to_none=True)
-        self.model.gaussians.post_optimizer_step(inject_noise=self.USE_MCMC)
-        if (
-            not self.USE_MCMC
-            and iteration < self.DENSIFICATION_END_ITERATION
-            and (radii := render_pkg.get('radii')) is not None
-            and radii.numel() > 0
-            and hasattr(self.model.gaussians, 'update_max_radii2D')
-        ):
-            with torch.no_grad():
-                self.model.gaussians.update_max_radii2D(radii)
-        if (
-            self.GEOMETRY_LOG_INTERVAL > 0
-            and iteration % self.GEOMETRY_LOG_INTERVAL == 0
-            and hasattr(self.loss, 'last_geometry_log')
-            and self.loss.last_geometry_log
-        ):
-            parts = []
-            for key, stats in self.loss.last_geometry_log.items():
-                short = key.replace('_REGULARIZATION', '').lower()
-                parts.append(f'{short}={stats["weighted"]:.5f}(w={stats["weight"]:.4g}, raw={stats["raw"]:.5f})')
-            with torch.no_grad():
-                mean_opacity = float(self.model.gaussians.opacities.mean().item())
-            Logger.log_info(f'iter {iteration} geometry: ' + ', '.join(parts) + f', mean_opacity={mean_opacity:.4f}')
-
-    @training_callback(priority=100, start_iteration='DENSIFICATION_START_ITERATION', end_iteration='DENSIFICATION_END_ITERATION', iteration_stride='DENSIFICATION_INTERVAL')
+    @training_callback(priority=100, active=False)
     @torch.no_grad()
     def densify(self, iteration: int, dataset: 'BaseDataset') -> None:
-        """2DGS-aligned densification — runs before train step so param resize never races backward."""
+        """Disabled — densify runs after backward inside ``training_iteration`` (official 2DGS order)."""
+
+    @training_callback(priority=90, active=False)
+    @torch.no_grad()
+    def reset_opacities(self, *_) -> None:
+        """Disabled — opacity reset runs after densify inside ``training_iteration``."""
+
+    @training_callback(priority=89, active=False)
+    @torch.no_grad()
+    def reset_opacities_extra(self, _, dataset: 'BaseDataset') -> None:
+        """Disabled — merged into ``_should_reset_opacities``."""
+
+    @torch.no_grad()
+    def _run_densify(self, iteration: int, dataset: 'BaseDataset') -> None:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         if self.USE_MCMC:
@@ -210,13 +153,12 @@ class Faster2DGSTrainer(FasterGSTrainer):
             )
             if self.requires_empty_cache and torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            skip_opacity_prune = self._skip_densify_opacity_cull(iteration)
             self.model.gaussians.adaptive_density_control(
                 self._effective_densification_grad_threshold(iteration),
                 self.DENSIFICATION_OPACITY_CULL,
                 iteration > self.OPACITY_RESET_INTERVAL,
                 max_screen_size=max_screen_size,
-                skip_opacity_prune=skip_opacity_prune,
+                skip_opacity_prune=False,
             )
             budget_pruned = self._enforce_splat_budget(iteration)
             stats = getattr(self.model.gaussians, '_last_densify_stats', None)
@@ -243,6 +185,64 @@ class Faster2DGSTrainer(FasterGSTrainer):
             torch.cuda.empty_cache()
         if self.FILTER_3D.USE:
             self.model.gaussians.compute_3d_filter(dataset.train())
+
+    @training_callback(priority=80)
+    def training_iteration(self, iteration: int, dataset: 'BaseDataset') -> None:
+        """Official 2DGS order: backward → densify → opacity reset → optimizer."""
+        self.model.train()
+        dataset.train()
+        self.loss.train()
+        self.model.gaussians.update_learning_rate(iteration + 1)
+        self.loss.set_geometry_loss_weights(
+            distortion_scale=self._distortion_scale(iteration),
+            normal_scale=self._normal_scale(iteration),
+            depth_smoothness_scale=self._depth_smoothness_scale(iteration),
+            planar_splat_scale=self._planar_splat_scale(iteration),
+        )
+        view = self.train_sampler.get(dataset=dataset)['view']
+        bg_color = torch.rand_like(view.camera.background_color) if self.USE_RANDOM_BACKGROUND_COLOR else view.camera.background_color
+        render_pkg = self.renderer.render_image_training(
+            view=view,
+            update_densification_info=not self.USE_MCMC and iteration < self.DENSIFICATION_END_ITERATION,
+            bg_color=bg_color,
+            photometric_only=not self._needs_aux_maps(iteration),
+        )
+        rgb_gt = view.rgb
+        if (supervision_alpha := get_supervision_alpha(view)) is not None:
+            rgb_gt = apply_background_color(rgb_gt, supervision_alpha, bg_color)
+        loss = self.loss(render_pkg, rgb_gt)
+        loss.backward()
+        if (
+            not self.USE_MCMC
+            and iteration < self.DENSIFICATION_END_ITERATION
+            and (radii := render_pkg.get('radii')) is not None
+            and radii.numel() > 0
+            and hasattr(self.model.gaussians, 'update_max_radii2D')
+        ):
+            with torch.no_grad():
+                self.model.gaussians.update_max_radii2D(radii)
+        if self._should_densify(iteration):
+            self._run_densify(iteration, dataset)
+        if self._should_reset_opacities(iteration, dataset):
+            if iteration == self.EXTRA_OPACITY_RESET_ITERATION and dataset.default_camera.background_color.sum() != 0.0:
+                Logger.log_info('resetting opacities one additional time because using non-black background')
+            self.model.gaussians.reset_opacities()
+        self.model.gaussians.optimizer.step()
+        self.model.gaussians.optimizer.zero_grad(set_to_none=True)
+        self.model.gaussians.post_optimizer_step(inject_noise=self.USE_MCMC)
+        if (
+            self.GEOMETRY_LOG_INTERVAL > 0
+            and iteration % self.GEOMETRY_LOG_INTERVAL == 0
+            and hasattr(self.loss, 'last_geometry_log')
+            and self.loss.last_geometry_log
+        ):
+            parts = []
+            for key, stats in self.loss.last_geometry_log.items():
+                short = key.replace('_REGULARIZATION', '').lower()
+                parts.append(f'{short}={stats["weighted"]:.5f}(w={stats["weight"]:.4g}, raw={stats["raw"]:.5f})')
+            with torch.no_grad():
+                mean_opacity = float(self.model.gaussians.opacities.mean().item())
+            Logger.log_info(f'iter {iteration} geometry: ' + ', '.join(parts) + f', mean_opacity={mean_opacity:.4f}')
 
     @post_training_callback(priority=1000)
     @torch.no_grad()

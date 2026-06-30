@@ -95,7 +95,7 @@ Acceptance:
    - multi-view consistency (not yet)
 3. Ensure these terms flow through analytic aux backward.
 
-**Status (implemented):** Normal + distortion match 2DGS `train.py`; iter gates 3k/7k; geometry loss console log every `GEOMETRY_LOG_INTERVAL`; depth smoothness (Phase D); configs use paper α (100 garden / 1000 guitar) + `LAMBDA_NORMAL=0.05`.
+**Status (implemented):** Normal + distortion match 2DGS `train.py`; iter gates 3k/7k (binary, no warmup); densify after backward; geometry loss console log every `GEOMETRY_LOG_INTERVAL`; depth smoothness (Phase D); configs use paper α (100 garden / 1000 guitar) + `LAMBDA_NORMAL=0.05`.
 
 Acceptance:
 - Loss terms are non-zero where expected and decrease during training.

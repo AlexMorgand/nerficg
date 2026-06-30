@@ -53,9 +53,9 @@ def _prepare_step(trainer, dataset, iteration: int):
     trainer.model.gaussians.update_learning_rate(iteration + 1)
     trainer.loss.set_geometry_loss_weights(
         distortion_scale=trainer._distortion_scale(iteration),
-        normal_scale=trainer._warmup_scale(iteration, trainer.NORMAL_START_ITERATION),
-        depth_smoothness_scale=trainer._warmup_scale(iteration, trainer.DEPTH_SMOOTHNESS_START_ITERATION),
-        planar_splat_scale=trainer._warmup_scale(iteration, trainer.PLANAR_SPLAT_START_ITERATION),
+        normal_scale=trainer._normal_scale(iteration),
+        depth_smoothness_scale=trainer._depth_smoothness_scale(iteration),
+        planar_splat_scale=trainer._planar_splat_scale(iteration),
     )
     view = trainer.train_sampler.get(dataset=dataset)['view']
     bg = (

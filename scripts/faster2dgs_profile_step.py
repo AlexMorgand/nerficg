@@ -153,10 +153,11 @@ def collect_densify_record(trainer, iteration: int) -> DensifyRecord | None:
 def is_densify_iteration(trainer, iteration: int) -> bool:
     if trainer.USE_MCMC:
         return False
-    start = trainer.DENSIFICATION_START_ITERATION
-    end = trainer.DENSIFICATION_END_ITERATION
-    stride = trainer.DENSIFICATION_INTERVAL
-    return start <= iteration <= end and (iteration - start) % stride == 0
+    return (
+        iteration > trainer.DENSIFICATION_START_ITERATION
+        and iteration < trainer.DENSIFICATION_END_ITERATION
+        and iteration % trainer.DENSIFICATION_INTERVAL == 0
+    )
 
 
 def run_training_log(trainer, dataset, num_iters: int) -> list[DensifyRecord]:
@@ -209,9 +210,9 @@ def _set_iter_schedules(trainer, iteration: int) -> None:
     trainer.model.gaussians.update_learning_rate(iteration + 1)
     trainer.loss.set_geometry_loss_weights(
         distortion_scale=trainer._distortion_scale(iteration),
-        normal_scale=trainer._warmup_scale(iteration, trainer.NORMAL_START_ITERATION),
-        depth_smoothness_scale=trainer._warmup_scale(iteration, trainer.DEPTH_SMOOTHNESS_START_ITERATION),
-        planar_splat_scale=trainer._warmup_scale(iteration, trainer.PLANAR_SPLAT_START_ITERATION),
+        normal_scale=trainer._normal_scale(iteration),
+        depth_smoothness_scale=trainer._depth_smoothness_scale(iteration),
+        planar_splat_scale=trainer._planar_splat_scale(iteration),
     )
 
 
