@@ -139,6 +139,17 @@ class Faster2DGSTrainer(FasterGSTrainer):
     def reset_opacities_extra(self, _, dataset: 'BaseDataset') -> None:
         """Disabled — merged into ``_should_reset_opacities``."""
 
+    def _densify_grace_after_opacity_reset(self, iteration: int) -> bool:
+        """Skip aggressive prune on the first densify after each opacity reset.
+
+        Reset caps all opacities at 0.01 (< opacity_cull 0.05). One densify later,
+        screen-size pruning with stale max_radii2D was removing ~50% of kitchen splats
+        before opacities could recover (iter 3100/6100).
+        """
+        if iteration <= self.OPACITY_RESET_INTERVAL:
+            return False
+        return iteration % self.OPACITY_RESET_INTERVAL == 100
+
     @torch.no_grad()
     def _run_densify(self, iteration: int, dataset: 'BaseDataset') -> None:
         if torch.cuda.is_available():
@@ -146,19 +157,24 @@ class Faster2DGSTrainer(FasterGSTrainer):
         if self.USE_MCMC:
             self.model.gaussians.mcmc_densification(min_opacity=0.005, cap_max=self.MAX_PRIMITIVES)
         else:
+            grace = self._densify_grace_after_opacity_reset(iteration)
             max_screen_size = (
-                self.DENSIFICATION_MAX_SCREEN_SIZE
-                if iteration > self.OPACITY_RESET_INTERVAL
-                else None
+                None
+                if grace
+                else (
+                    self.DENSIFICATION_MAX_SCREEN_SIZE
+                    if iteration > self.OPACITY_RESET_INTERVAL
+                    else None
+                )
             )
             if self.requires_empty_cache and torch.cuda.is_available():
                 torch.cuda.empty_cache()
             self.model.gaussians.adaptive_density_control(
                 self._effective_densification_grad_threshold(iteration),
                 self.DENSIFICATION_OPACITY_CULL,
-                iteration > self.OPACITY_RESET_INTERVAL,
+                iteration > self.OPACITY_RESET_INTERVAL and not grace,
                 max_screen_size=max_screen_size,
-                skip_opacity_prune=False,
+                skip_opacity_prune=grace,
             )
             budget_pruned = self._enforce_splat_budget(iteration)
             stats = getattr(self.model.gaussians, '_last_densify_stats', None)

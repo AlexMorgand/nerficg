@@ -64,7 +64,7 @@ def _update_densification_info(
     if not bool(visible.any().item()):
         return
     densification_info[0, visible] += 1.0
-    densification_info[1, visible] += grad_means2d[visible, :2].norm(dim=1)
+    densification_info[1, visible] += grad_means2d[visible].norm(dim=-1)
 
 
 def _register_densification_hook(

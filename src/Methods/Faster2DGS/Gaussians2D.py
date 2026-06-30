@@ -190,7 +190,6 @@ class Gaussians2D(Gaussians):
             split_opacities = self._opacities.new_empty((0, 1))
             split_rotations = self._rotations.new_empty((0, 4))
 
-        saved_max_radii2D = self._max_radii2D.clone() if self._max_radii2D is not None else None
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         param_groups = extend_param_groups(self.optimizer, {
@@ -236,15 +235,9 @@ class Gaussians2D(Gaussians):
             world_thresh = math.log(0.1 * self.training_cameras_extent)
             world_prune = self._scales.max(dim=1).values > world_thresh
             prune_mask |= world_prune
-            if max_screen_size is not None and saved_max_radii2D is not None:
-                n_old = saved_max_radii2D.shape[0]
-                if self._max_radii2D.shape[0] == n_old + n_new_gaussians:
-                    screen_radii = torch.cat([
-                        saved_max_radii2D,
-                        torch.zeros(n_new_gaussians, device='cuda', dtype=saved_max_radii2D.dtype),
-                    ])
-                    screen_prune = screen_radii > max_screen_size
-                    prune_mask |= screen_prune
+            if max_screen_size is not None and self._max_radii2D is not None:
+                screen_prune = self._max_radii2D > max_screen_size
+                prune_mask |= screen_prune
         n_pruned = int(prune_mask.sum().item())
         self._last_prune_breakdown = {
             'split_parents': int(split_mask.sum().item()),
