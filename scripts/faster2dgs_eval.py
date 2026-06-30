@@ -2,10 +2,11 @@
 """Train Faster2DGS to N iterations, render test set, report PSNR vs 2DGS paper.
 
 Examples:
-    python faster2dgs_eval.py -c configs/2DGS_indoor.yaml \\
-        DATASET.PATH=/data/MipNerf/360_v2/kitchen --iters 10000
+    python faster2dgs_eval.py -c configs/2DGS_m360.yaml \\
+        DATASET.PATH=dataset/mipnerf360/garden DATASET.IMAGE_SCALE_FACTOR=0.25 --iters 30000
 
-    python faster2dgs_eval.py -c configs/gs_stump_2DGS.yaml --iters 10000
+    python faster2dgs_eval.py -c configs/2DGS_m360.yaml \\
+        DATASET.PATH=dataset/mipnerf360/kitchen DATASET.IMAGE_SCALE_FACTOR=0.5 --iters 7000
 
     # Re-render metrics from an existing run (no training):
     python faster2dgs_eval.py --render-only -d output/Faster2DGS/kitchen_... --checkpoint final.pt

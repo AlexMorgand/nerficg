@@ -21,3 +21,9 @@ backup/
 .pytest_cache/
 imgui.ini
 __pycache__/
+# Accidental conda-prefix extracts under simple-knn (use scripts/install.py instead)
+submodules/simple-knn/*-*_*/
+submodules/simple-knn/python-*/
+submodules/simple-knn/pip-*/
+submodules/simple-knn/urls
+submodules/simple-knn/urls.txt

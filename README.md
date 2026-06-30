@@ -103,6 +103,17 @@ python ./scripts/train.py -c configs/<CONFIG_NAME>.yaml
 ```
 The resulting images and model checkpoints will be saved to the `output` directory.
 
+### Faster2DGS (2D Gaussian Splatting)
+
+Install with `python scripts/install.py -m Faster2DGS`, then see
+[`src/Methods/Faster2DGS/README.md`](src/Methods/Faster2DGS/README.md) for MipNeRF360 presets,
+parity validation, mesh export, and profiling scripts. Quick start:
+
+```
+python scripts/train.py -c configs/2DGS_m360.yaml \
+    DATASET.PATH=dataset/mipnerf360/garden DATASET.IMAGE_SCALE_FACTOR=0.25
+```
+
 To train multiple models from a directory or list of configuration files, use the `scripts/sequential_train.py` script with the `-d` or `-c` flag respectively.
 
 
