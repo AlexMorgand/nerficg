@@ -239,7 +239,7 @@ int CudaRasterizer::Rasterizer::forward(
 	float* out_others,
 	int* radii,
 	bool debug,
-	bool photometric_only)
+	int aux_mode)
 {
 	const float focal_y = height / (2.0f * tan_fovy);
 	const float focal_x = width / (2.0f * tan_fovx);
@@ -381,7 +381,7 @@ int CudaRasterizer::Rasterizer::forward(
 		background,
 		out_color,
 		out_others,
-		photometric_only), debug)
+		aux_mode), debug)
 
 	return num_rendered;
 }
@@ -421,7 +421,7 @@ void CudaRasterizer::Rasterizer::backward(
 	float* dL_dscale,
 	float* dL_drot,
 	bool debug,
-	bool photometric_only)
+	int aux_mode)
 {
 	const dim3 tile_grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);
 	const dim3 block(BLOCK_X, BLOCK_Y, 1);
@@ -480,7 +480,7 @@ void CudaRasterizer::Rasterizer::backward(
 		dL_dnormal,
 		dL_dopacity,
 		dL_dcolor,
-		photometric_only), debug)
+		aux_mode), debug)
 
 	// Take care of the rest of preprocessing. Was the precomputed covariance
 	// given to us or a scales/rot pair? If precomputed, pass that. If not,

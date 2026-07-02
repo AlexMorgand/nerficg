@@ -375,7 +375,7 @@ renderCUDA_color_only(
 // sums (color/depth/normal/alpha/distortion contributed by *later* primitives)
 // are reconstructed front-to-back from the forward bucket checkpoints + the final
 // output maps, avoiding the original 2DGS per-tile serial reverse traversal.
-template <uint32_t C>
+template <uint32_t C, bool INCLUDE_NORMAL>
 __global__ void __launch_bounds__(32)
 renderCUDA(
 	const uint2* __restrict__ ranges,
@@ -523,14 +523,20 @@ renderCUDA(
 						out_color[1 * n_pixels + pid] - Tf * background.y,
 						out_color[2 * n_pixels + pid] - Tf * background.z);
 					Dfinal = out_others[DEPTH_OFFSET * n_pixels + pid];
-					for (int ch = 0; ch < 3; ch++) Nfinal[ch] = out_others[(NORMAL_OFFSET + ch) * n_pixels + pid];
+					if constexpr (INCLUDE_NORMAL) {
+						for (int ch = 0; ch < 3; ch++) Nfinal[ch] = out_others[(NORMAL_OFFSET + ch) * n_pixels + pid];
+					}
 					for (int ch = 0; ch < 3; ch++) dpix[ch] = dL_dpixels[ch * n_pixels + pid];
 					dd = dL_depths[DEPTH_OFFSET * n_pixels + pid];
 					da = dL_depths[ALPHA_OFFSET * n_pixels + pid];
 					dr = dL_depths[DISTORTION_OFFSET * n_pixels + pid];
-					for (int ch = 0; ch < 3; ch++) dn[ch] = dL_depths[(NORMAL_OFFSET + ch) * n_pixels + pid];
-					dm = dL_depths[MIDDEPTH_OFFSET * n_pixels + pid];
-					lastc = n_contrib[pid]; medi = median_contrib[pid];
+					if constexpr (INCLUDE_NORMAL) {
+						for (int ch = 0; ch < 3; ch++) dn[ch] = dL_depths[(NORMAL_OFFSET + ch) * n_pixels + pid];
+						dm = dL_depths[MIDDEPTH_OFFSET * n_pixels + pid];
+						lastc = n_contrib[pid]; medi = median_contrib[pid];
+					} else {
+						lastc = n_contrib[pid]; medi = 0;
+					}
 					cT = ckpt_color_T[local_idx];
 					adn = ckpt_aux_dn[local_idx];
 					amm = ckpt_aux_m[local_idx];
@@ -546,17 +552,28 @@ renderCUDA(
 				sh_color_after[2][lane] = cfinal.z - cT.z;
 				sh_T[lane] = T_pre;
 				sh_D_after[lane] = Dfinal - adn.x;
-				sh_N_after[0][lane] = Nfinal[0] - adn.y;
-				sh_N_after[1][lane] = Nfinal[1] - adn.z;
-				sh_N_after[2][lane] = Nfinal[2] - adn.w;
+				if constexpr (INCLUDE_NORMAL) {
+					sh_N_after[0][lane] = Nfinal[0] - adn.y;
+					sh_N_after[1][lane] = Nfinal[1] - adn.z;
+					sh_N_after[2][lane] = Nfinal[2] - adn.w;
+				} else {
+					sh_N_after[0][lane] = 0.0f;
+					sh_N_after[1][lane] = 0.0f;
+					sh_N_after[2][lane] = 0.0f;
+				}
 				sh_alpha_after[lane] = T_pre - Tf;
 				sh_G_after[lane] = G_total - prefix_before;
 				for (int ch = 0; ch < 3; ch++) sh_dL_dpix[ch][lane] = dpix[ch];
 				sh_dL_ddepth[lane] = dd;
 				sh_dL_daccum[lane] = da;
-				for (int ch = 0; ch < 3; ch++) sh_dL_dnormal[ch][lane] = dn[ch];
+				if constexpr (INCLUDE_NORMAL) {
+					for (int ch = 0; ch < 3; ch++) sh_dL_dnormal[ch][lane] = dn[ch];
+					sh_dL_dmedian[lane] = dm;
+				} else {
+					for (int ch = 0; ch < 3; ch++) sh_dL_dnormal[ch][lane] = 0.0f;
+					sh_dL_dmedian[lane] = 0.0f;
+				}
 				sh_dL_dreg[lane] = dr;
-				sh_dL_dmedian[lane] = dm;
 				sh_grad_alpha_common[lane] = Tf * -(dpix[0] * background.x + dpix[1] * background.y + dpix[2] * background.z);
 				sh_final_A[lane] = final_A;
 				sh_final_M1[lane] = M1f;
@@ -656,7 +673,9 @@ renderCUDA(
 		// Update strictly-after suffix sums (subtract current contribution).
 		for (int ch = 0; ch < 3; ch++) r_color_after[ch] -= w * color[ch];
 		r_D_after -= w * depth;
-		for (int ch = 0; ch < 3; ch++) r_N_after[ch] -= w * normal[ch];
+		if constexpr (INCLUDE_NORMAL) {
+			for (int ch = 0; ch < 3; ch++) r_N_after[ch] -= w * normal[ch];
+		}
 		r_alpha_after -= w;
 		r_G_after -= w * g_i;
 
@@ -667,8 +686,10 @@ renderCUDA(
 		dL_dalpha += r_grad_alpha_common * omar;                                  // background
 		dL_dalpha += (T_i * depth - r_D_after * omar) * r_dL_ddepth;              // expected depth
 		dL_dalpha += (T_i - r_alpha_after * omar) * r_dL_daccum;                  // accumulated alpha
-		for (int ch = 0; ch < 3; ch++)
-			dL_dalpha += (T_i * normal[ch] - r_N_after[ch] * omar) * r_dL_dnormal[ch]; // normal
+		if constexpr (INCLUDE_NORMAL) {
+			for (int ch = 0; ch < 3; ch++)
+				dL_dalpha += (T_i * normal[ch] - r_N_after[ch] * omar) * r_dL_dnormal[ch]; // normal
+		}
 		dL_dalpha += (T_i * g_i - r_G_after * omar) * r_dL_dreg;                  // distortion
 
 		// Direct color gradient.
@@ -677,16 +698,20 @@ renderCUDA(
 
 		// Depth (ray-splat) gradient.
 		float dL_dz = 0.0f;
-		if (r_median_idx != 0 && (uint32_t)(tile_primitive_idx + 1) == r_median_idx)
-			dL_dz += r_dL_dmedian;
+		if constexpr (INCLUDE_NORMAL) {
+			if (r_median_idx != 0 && (uint32_t)(tile_primitive_idx + 1) == r_median_idx)
+				dL_dz += r_dL_dmedian;
+		}
 		const float dmd_dd = (far_n * near_n) / ((far_n - near_n) * depth * depth);
 		const float dL_dmd = 2.0f * w * (m * r_final_A - r_final_M1) * r_dL_dreg;
 		dL_dz += dL_dmd * dmd_dd;
 		dL_dz += w * r_dL_ddepth;
 
 		// Direct normal gradient.
-		for (int ch = 0; ch < 3; ch++)
-			dL_dnormal_acc[ch] += w * r_dL_dnormal[ch];
+		if constexpr (INCLUDE_NORMAL) {
+			for (int ch = 0; ch < 3; ch++)
+				dL_dnormal_acc[ch] += w * r_dL_dnormal[ch];
+		}
 
 		const float dL_dG = opacity * dL_dalpha;
 		dL_dopacity_acc += G * dL_dalpha;
@@ -731,7 +756,9 @@ renderCUDA(
 		atomicAdd(&dL_dtransMat[global_id * 9 + 8], dL_dTw[2]);
 		atomicAdd(&dL_dmean2D[global_id].x, dL_dmean2d_acc.x);
 		atomicAdd(&dL_dmean2D[global_id].y, dL_dmean2d_acc.y);
-		for (int ch = 0; ch < 3; ch++) atomicAdd(&dL_dnormal3D[global_id * 3 + ch], dL_dnormal_acc[ch]);
+		if constexpr (INCLUDE_NORMAL) {
+			for (int ch = 0; ch < 3; ch++) atomicAdd(&dL_dnormal3D[global_id * 3 + ch], dL_dnormal_acc[ch]);
+		}
 		atomicAdd(&dL_dopacity[global_id], dL_dopacity_acc);
 		for (int ch = 0; ch < 3; ch++) atomicAdd(&dL_dcolors[global_id * 3 + ch], dL_dcolor_acc[ch]);
 	}
@@ -1012,10 +1039,10 @@ void BACKWARD::render(
 	float* dL_dnormal3D,
 	float* dL_dopacity,
 	float* dL_dcolors,
-	bool photometric_only)
+	int aux_mode)
 {
 	if (n_buckets == 0) return;
-	if (photometric_only) {
+	if (aux_mode == AUX_PHOTOMETRIC) {
 		renderCUDA_color_only << <n_buckets, 32 >> >(
 			ranges,
 			point_list,
@@ -1040,7 +1067,40 @@ void BACKWARD::render(
 		);
 		return;
 	}
-	renderCUDA<NUM_CHANNELS> << <n_buckets, 32 >> >(
+	if (aux_mode == AUX_DISTORTION) {
+		renderCUDA<NUM_CHANNELS, false> << <n_buckets, 32 >> >(
+			ranges,
+			point_list,
+			W, H,
+			bg_color,
+			means2D,
+			normal_opacity,
+			transMats,
+			colors,
+			out_color,
+			out_others,
+			final_T,
+			final_M1,
+			final_M2,
+			n_contrib,
+			median_contrib,
+			max_contrib,
+			tile_bucket_offsets,
+			bucket_tile_index,
+			bucket_color_T,
+			bucket_aux_dn,
+			bucket_aux_m,
+			dL_dpixels,
+			dL_depths,
+			dL_dtransMat,
+			dL_dmean2D,
+			dL_dnormal3D,
+			dL_dopacity,
+			dL_dcolors
+		);
+		return;
+	}
+	renderCUDA<NUM_CHANNELS, true> << <n_buckets, 32 >> >(
 		ranges,
 		point_list,
 		W, H,

@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
-from Methods.FasterGS.FasterGSCudaBackend import RasterizerSettings as SurfelRasterizerSettings
-
 from .Faster2DGSCudaBackend.torch_bindings.surfel_rasterization import (
+    SurfelAuxMode,
+    SurfelRasterizerSettings,
     diff_rasterize_surfel_with_aux,
+    rasterize_surfel,
     rasterize_surfel_with_aux,
 )
 
 __all__ = [
+    'SurfelAuxMode',
     'SurfelRasterizerSettings',
     'diff_rasterize_surfel_with_aux',
+    'rasterize_surfel',
     'rasterize_surfel_with_aux',
     'has_surfel_backend',
     'configure_backend',
@@ -41,3 +44,4 @@ def has_native_diff_surfel_backend() -> bool:
 
 def configure_backend(**_kwargs) -> None:
     """No-op retained for API compatibility; native surfel is the only backend."""
+    return None

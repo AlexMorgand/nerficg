@@ -24,6 +24,11 @@
 #define DISTORTION_OFFSET 6
 // #define MEDIAN_WEIGHT_OFFSET 7
 
+// Surfel auxiliary accumulation modes (forward/backward dispatch).
+#define AUX_PHOTOMETRIC 0
+#define AUX_DISTORTION 1
+#define AUX_FULL 2
+
 // distortion helper macros
 #define BACKFACE_CULL 1
 #define DUAL_VISIABLE 1

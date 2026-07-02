@@ -47,7 +47,7 @@ namespace BACKWARD
 		float* dL_dnormal3D,
 		float* dL_dopacity,
 		float* dL_dcolors,
-		bool photometric_only = false);
+		int aux_mode = 2);
 
 	void preprocess(
 		int P, int D, int M,

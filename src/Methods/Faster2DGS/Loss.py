@@ -129,12 +129,11 @@ class Faster2DGSLoss(BaseLoss):
                     'DEPTH_SMOOTHNESS_REGULARIZATION',
                 ):
                     for metric in self.loss_metrics:
-                        if metric.name != name:
+                        if metric.name != name or metric._last_raw is None:
                             continue
-                        raw = metric.metric_func()
                         self._last_geometry_log[name] = {
-                            'raw': float(raw.detach().cpu()),
-                            'weighted': float((raw * metric.weight).detach().cpu()),
+                            'raw': metric._last_raw,
+                            'weighted': metric._last_raw * metric.weight,
                             'weight': float(metric.weight),
                         }
                         break

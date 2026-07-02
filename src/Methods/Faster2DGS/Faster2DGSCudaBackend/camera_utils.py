@@ -60,4 +60,4 @@ def build_surfel_camera(view: View) -> tuple[torch.Tensor, torch.Tensor, torch.T
 def viewspace_normal_to_world(normal_view: torch.Tensor, world_view_transform: torch.Tensor) -> torch.Tensor:
     """Match official 2DGS ``gaussian_renderer``: view-space normal → world."""
     rot = world_view_transform[:3, :3].T
-    return torch.einsum('ij,jhw->ihw', rot, normal_view)
+    return (normal_view.permute(1, 2, 0) @ rot).permute(2, 0, 1)

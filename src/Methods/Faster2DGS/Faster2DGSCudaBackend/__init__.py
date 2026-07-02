@@ -23,6 +23,7 @@ from .camera_utils import (
     viewspace_normal_to_world,
 )
 from .surfel_rasterization import (
+    SurfelAuxMode,
     SurfelRasterizerSettings,
     configure_backend,
     diff_rasterize_surfel_with_aux,
@@ -30,10 +31,12 @@ from .surfel_rasterization import (
     has_native_surfel_backend,
     has_surfel_backend,
     has_true_surfel_backend,
+    rasterize_surfel,
     rasterize_surfel_with_aux,
 )
 
 __all__ = [
+    'SurfelAuxMode',
     'SurfelRasterizerSettings',
     'build_surfel_camera',
     'configure_backend',
@@ -44,6 +47,7 @@ __all__ = [
     'has_native_surfel_backend',
     'has_surfel_backend',
     'has_true_surfel_backend',
+    'rasterize_surfel',
     'rasterize_surfel_with_aux',
     'viewspace_normal_to_world',
 ]

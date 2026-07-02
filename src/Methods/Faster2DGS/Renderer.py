@@ -10,13 +10,16 @@ from Datasets.utils import View
 from Logging import Logger
 from Methods.Base.Renderer import BaseRenderer, BaseModel
 from Methods.Faster2DGS.Faster2DGSCudaBackend import (
-    SurfelRasterizerSettings,
+    SurfelAuxMode,
     build_surfel_camera,
     diff_rasterize_surfel_with_aux,
+    rasterize_surfel,
+    rasterize_surfel_with_aux,
     viewspace_normal_to_world,
 )
 from Methods.Faster2DGS.depth_utils import depth_to_normal
 from Methods.Faster2DGS.Model import Faster2DGSModel
+from Methods.FasterGS.FasterGSCudaBackend import RasterizerSettings
 from Methods.FasterGS.Renderer import FasterGSRenderer, extract_settings
 
 
@@ -25,6 +28,8 @@ def _parse_surfel_allmap(
     view: View,
     depth_ratio: float,
     world_view_transform: torch.Tensor | None = None,
+    *,
+    compute_surf_normal: bool = True,
 ) -> dict[str, torch.Tensor]:
     """7-channel surfel allmap → training outputs."""
     depth_expected_num = allmap[0:1]
@@ -42,9 +47,12 @@ def _parse_surfel_allmap(
     rend_normal = viewspace_normal_to_world(rend_normal_view, world_view_transform)
     rend_normal = torch.nn.functional.normalize(rend_normal, dim=0, eps=1e-6).nan_to_num(0.0)
 
-    surf_normal_hwc = depth_to_normal(view, surf_depth)
-    surf_normal = surf_normal_hwc.permute(2, 0, 1)
-    surf_normal = torch.nn.functional.normalize(surf_normal, dim=0, eps=1e-6).nan_to_num(0.0)
+    if compute_surf_normal:
+        surf_normal_hwc = depth_to_normal(view, surf_depth)
+        surf_normal = surf_normal_hwc.permute(2, 0, 1)
+        surf_normal = torch.nn.functional.normalize(surf_normal, dim=0, eps=1e-6).nan_to_num(0.0)
+    else:
+        surf_normal = torch.zeros_like(rend_normal)
 
     return {
         'rend_alpha': rend_alpha,
@@ -84,6 +92,7 @@ class Faster2DGSRenderer(FasterGSRenderer):
         bg_color: torch.Tensor,
         scale_modifier: float = 1.0,
         uniform_opacity: float | None = None,
+        aux_mode: int | None = None,
         photometric_only: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         settings = extract_settings(view, self.model.gaussians.active_sh_bases, bg_color, self.PROPER_ANTIALIASING)
@@ -95,10 +104,11 @@ class Faster2DGSRenderer(FasterGSRenderer):
             sh_coefficients_0=self.model.gaussians.sh_coefficients_0,
             sh_coefficients_rest=self.model.gaussians.sh_coefficients_rest,
             densification_info=self.model.gaussians.densification_info if update_densification_info else torch.empty(0),
-            rasterizer_settings=SurfelRasterizerSettings(*settings),
+            rasterizer_settings=RasterizerSettings(*settings),
             view=view,
             scale_modifier=scale_modifier,
             uniform_opacity=uniform_opacity,
+            aux_mode=aux_mode,
             photometric_only=photometric_only,
         )
         self._last_training_radii = radii
@@ -110,12 +120,23 @@ class Faster2DGSRenderer(FasterGSRenderer):
         parsed['surf_normal'] = parsed['surf_normal'] * rend_alpha.detach()
         return parsed
 
-    def _training_outputs_from_aux(self, view: View, auxiliary_maps: torch.Tensor) -> dict[str, torch.Tensor]:
+    def _training_outputs_from_aux(
+        self,
+        view: View,
+        auxiliary_maps: torch.Tensor,
+        *,
+        compute_surf_normal: bool = True,
+    ) -> dict[str, torch.Tensor]:
         if auxiliary_maps.shape[0] != 7:
             raise Framework.RendererError(
                 f'Faster2DGS expects 7-channel surfel allmap, got shape {tuple(auxiliary_maps.shape)}'
             )
-        parsed = _parse_surfel_allmap(auxiliary_maps, view, self.DEPTH_RATIO)
+        parsed = _parse_surfel_allmap(
+            auxiliary_maps,
+            view,
+            self.DEPTH_RATIO,
+            compute_surf_normal=compute_surf_normal,
+        )
         return self._apply_training_normal_weights(parsed)
 
     def _render_splat_debug(self, view: View) -> torch.Tensor:
@@ -139,23 +160,89 @@ class Faster2DGSRenderer(FasterGSRenderer):
             return out_chw
         return {k: v.permute(1, 2, 0) for k, v in out_chw.items()}
 
-    def render_image_training(self, view: View, update_densification_info: bool, bg_color: torch.Tensor, *, photometric_only: bool = False) -> dict[str, torch.Tensor]:
-        rgb, auxiliary_maps = self._rasterize_training(view, update_densification_info, bg_color, photometric_only=photometric_only)
-        if photometric_only:
+    def render_image(self, view: View, to_chw: bool = False, benchmark: bool = False) -> dict[str, torch.Tensor]:
+        if benchmark or self.FORCE_OPTIMIZED_INFERENCE:
+            return self.render_image_benchmark(view, to_chw=to_chw or benchmark)
+        if self.model.training:
+            raise Framework.RendererError('please directly call render_image_training() instead of render_image() during training')
+        return self.render_image_inference(view, to_chw)
+
+    def render_image_training(
+        self,
+        view: View,
+        update_densification_info: bool,
+        bg_color: torch.Tensor,
+        *,
+        aux_mode: int | None = None,
+        photometric_only: bool = False,
+        compute_surf_normal: bool = True,
+    ) -> dict[str, torch.Tensor]:
+        rgb, auxiliary_maps = self._rasterize_training(
+            view,
+            update_densification_info,
+            bg_color,
+            aux_mode=aux_mode,
+            photometric_only=photometric_only,
+        )
+        resolved_aux = (
+            aux_mode
+            if aux_mode is not None
+            else (SurfelAuxMode.PHOTOMETRIC if photometric_only else SurfelAuxMode.FULL)
+        )
+        if resolved_aux == SurfelAuxMode.PHOTOMETRIC:
             out = {'rgb': rgb}
         else:
-            parsed = self._training_outputs_from_aux(view, auxiliary_maps)
+            parsed = self._training_outputs_from_aux(
+                view,
+                auxiliary_maps,
+                compute_surf_normal=compute_surf_normal,
+            )
             out = {'rgb': rgb, **parsed}
         if update_densification_info and hasattr(self, '_last_training_radii'):
             out['radii'] = self._last_training_radii
         return out
 
+    @torch.inference_mode()
+    def render_image_benchmark(self, view: View, to_chw: bool = False) -> dict[str, torch.Tensor]:
+        """RGB-only inference via photometric surfel kernel (no autograd, no aux)."""
+        settings = extract_settings(
+            view,
+            self.model.gaussians.active_sh_bases,
+            view.camera.background_color,
+            self.PROPER_ANTIALIASING,
+        )
+        image = rasterize_surfel(
+            means=self.model.gaussians.means,
+            raw_scales_2d=self.model.gaussians.raw_scales_2d,
+            rotations=self.model.gaussians.raw_rotations,
+            opacities=self.model.gaussians.raw_opacities,
+            sh_coefficients_0=self.model.gaussians.sh_coefficients_0,
+            sh_coefficients_rest=self.model.gaussians.sh_coefficients_rest,
+            rasterizer_settings=RasterizerSettings(*settings),
+            view=view,
+            scale_modifier=self.SCALE_MODIFIER,
+            to_chw=to_chw,
+            clamp_output=True,
+        )
+        return {'rgb': image}
+
     @torch.no_grad()
     def render_image_inference(self, view: View, to_chw: bool = False) -> dict[str, torch.Tensor]:
-        rgb, auxiliary_maps = self._rasterize_training(
+        settings = extract_settings(
             view,
-            update_densification_info=False,
-            bg_color=view.camera.background_color,
+            self.model.gaussians.active_sh_bases,
+            view.camera.background_color,
+            self.PROPER_ANTIALIASING,
+        )
+        rgb, auxiliary_maps = rasterize_surfel_with_aux(
+            means=self.model.gaussians.means,
+            raw_scales_2d=self.model.gaussians.raw_scales_2d,
+            rotations=self.model.gaussians.raw_rotations,
+            opacities=self.model.gaussians.raw_opacities,
+            sh_coefficients_0=self.model.gaussians.sh_coefficients_0,
+            sh_coefficients_rest=self.model.gaussians.sh_coefficients_rest,
+            rasterizer_settings=RasterizerSettings(*settings),
+            view=view,
             scale_modifier=self.SCALE_MODIFIER,
         )
 
@@ -179,11 +266,16 @@ class Faster2DGSRenderer(FasterGSRenderer):
             rend_normal = torch.nn.functional.normalize(rend_normal, dim=0, eps=1e-6)
         rend_normal = rend_normal.nan_to_num(0.0)
         normal_vis = (rend_normal * 0.5 + 0.5).clamp(0.0, 1.0)
+        surf_normal = parsed['surf_normal']
+        surf_normal_vis = (
+            torch.nn.functional.normalize(surf_normal, dim=0, eps=1e-6).nan_to_num(0.0) * 0.5 + 0.5
+        ).clamp(0.0, 1.0)
         out = {
             'rgb': rgb.clamp(0.0, 1.0),
             'alpha': rend_alpha,
             'depth': depth,
             'normal': normal_vis,
+            'surf_normal': surf_normal_vis,
         }
         if self.INCLUDE_SPLAT_DEBUG:
             out['splats'] = self._render_splat_debug(view)

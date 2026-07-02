@@ -52,7 +52,7 @@ RasterizeGaussiansCUDA(
 	const torch::Tensor& campos,
 	const bool prefiltered,
 	const bool debug,
-	const bool photometric_only)
+	const int aux_mode)
 {
   if (means3D.ndimension() != 2 || means3D.size(1) != 3) {
 	AT_ERROR("means3D must have dimensions (num_points, 3)");
@@ -125,7 +125,7 @@ RasterizeGaussiansCUDA(
 		out_others.contiguous().data<float>(),
 		radii.contiguous().data<int>(),
 		debug,
-		photometric_only);
+		aux_mode);
   }
   return std::make_tuple(rendered, out_color, out_others, radii, geomBuffer, binningBuffer, imgBuffer);
 }
@@ -156,7 +156,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const torch::Tensor& out_color,
 	const torch::Tensor& out_others,
 	const bool debug,
-	const bool photometric_only) 
+	const int aux_mode) 
 {
 
   CHECK_INPUT(background);
@@ -229,7 +229,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	  dL_dscales.contiguous().data<float>(),
 	  dL_drotations.contiguous().data<float>(),
 	  debug,
-	  photometric_only);
+	  aux_mode);
   }
 
   return std::make_tuple(dL_dmeans2D, dL_dcolors, dL_dopacity, dL_dmeans3D, dL_dtransMat, dL_dsh, dL_dscales, dL_drotations);

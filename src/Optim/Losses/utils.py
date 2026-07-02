@@ -43,6 +43,7 @@ class QualityMetricItem:
 class LossMetricItem(QualityMetricItem):
     """Used to store individual loss terms in BaseLoss"""
     weight: float = 1.0
+    _last_raw: float | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         super().__post_init__()
@@ -53,5 +54,8 @@ class LossMetricItem(QualityMetricItem):
 
     def _call_metric(self, kwargs: Any) -> torch.Tensor:
         if self.weight > 0.0:
-            return self.metric_func(**kwargs) * self.weight
+            raw = self.metric_func(**kwargs)
+            self._last_raw = float(raw.detach().cpu())
+            return raw * self.weight
+        self._last_raw = None
         return torch.tensor(0.0)

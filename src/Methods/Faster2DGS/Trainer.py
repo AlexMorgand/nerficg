@@ -7,6 +7,7 @@ from Datasets.Base import BaseDataset
 from Datasets.utils import apply_background_color, get_supervision_alpha
 from Logging import Logger
 from Methods.Base.utils import pre_training_callback, training_callback, post_training_callback
+from Methods.Faster2DGS.Faster2DGSCudaBackend import SurfelAuxMode
 from Methods.Faster2DGS.Loss import Faster2DGSLoss
 from Methods.FasterGS.Trainer import FasterGSTrainer
 
@@ -80,6 +81,17 @@ class Faster2DGSTrainer(FasterGSTrainer):
         if self._planar_splat_scale(iteration) > 0.0:
             return True
         return False
+
+    def _aux_mode(self, iteration: int) -> int:
+        if self._normal_scale(iteration) > 0.0 or self._depth_smoothness_scale(iteration) > 0.0:
+            return SurfelAuxMode.FULL
+        if self._distortion_scale(iteration) > 0.0:
+            return SurfelAuxMode.DISTORTION
+        return SurfelAuxMode.PHOTOMETRIC
+
+    def _needs_surf_normal(self, iteration: int) -> bool:
+        """``depth_to_normal`` is only required when normal or depth-smoothness losses are active."""
+        return self._normal_scale(iteration) > 0.0 or self._depth_smoothness_scale(iteration) > 0.0
 
     def _should_densify(self, iteration: int) -> bool:
         return (
@@ -221,7 +233,8 @@ class Faster2DGSTrainer(FasterGSTrainer):
             view=view,
             update_densification_info=not self.USE_MCMC and iteration < self.DENSIFICATION_END_ITERATION,
             bg_color=bg_color,
-            photometric_only=not self._needs_aux_maps(iteration),
+            aux_mode=self._aux_mode(iteration),
+            compute_surf_normal=self._needs_surf_normal(iteration),
         )
         rgb_gt = view.rgb
         if (supervision_alpha := get_supervision_alpha(view)) is not None:

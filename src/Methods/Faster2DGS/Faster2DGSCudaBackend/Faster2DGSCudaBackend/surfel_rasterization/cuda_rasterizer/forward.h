@@ -70,7 +70,7 @@ namespace FORWARD
 		const float* bg_color,
 		float* out_color,
 		float* out_others,
-		bool photometric_only = false);
+		int aux_mode = 2);
 }
 
 
