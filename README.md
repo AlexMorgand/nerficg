@@ -106,12 +106,19 @@ The resulting images and model checkpoints will be saved to the `output` directo
 ### Faster2DGS (2D Gaussian Splatting)
 
 Install with `python scripts/install.py -m Faster2DGS`, then see
-[`src/Methods/Faster2DGS/README.md`](src/Methods/Faster2DGS/README.md) for MipNeRF360 presets,
-parity validation, mesh export, and profiling scripts. Quick start:
+[`src/Methods/Faster2DGS/README.md`](src/Methods/Faster2DGS/README.md). Two presets:
 
-```
+- **Photometric:** `configs/2DGS_m360.yaml` — M360 PSNR parity, custom COLMAP NVS
+- **Mesh:** `configs/2DGS_mesh.yaml` — distortion + normal, TSDF export
+
+```bash
+# Photometric
 python scripts/train.py -c configs/2DGS_m360.yaml \
     DATASET.PATH=dataset/mipnerf360/garden DATASET.IMAGE_SCALE_FACTOR=0.25
+
+# Mesh (COLMAP capture)
+python scripts/train.py -c configs/2DGS_mesh.yaml \
+    'DATASET.PATH=your_scene/undistort' DATASET.IMAGE_SCALE_FACTOR=0.5
 ```
 
 To train multiple models from a directory or list of configuration files, use the `scripts/sequential_train.py` script with the `-d` or `-c` flag respectively.

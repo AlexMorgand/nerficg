@@ -10,6 +10,9 @@ Examples:
 
     # Re-render metrics from an existing run (no training):
     python faster2dgs_eval.py --render-only -d output/Faster2DGS/kitchen_... --checkpoint final.pt
+
+    # Train + end-of-run step timing (~15 CUDA repeats):
+    python faster2dgs_eval.py -c configs/2DGS_m360.yaml ... --iters 7000 --profile-default
 """
 
 from __future__ import annotations
@@ -26,6 +29,13 @@ with utils.DiscoverSourcePath():
     from Implementations import Datasets as DI
     from Implementations import Methods as MI
     from Logging import Logger
+    from faster2dgs_timings import (
+        collect_run_timings,
+        format_step_profile,
+        format_train_timing,
+        parse_timings_txt,
+        profile_training_steps,
+    )
 
 # 2DGS paper Table 1 — MipNeRF360 test PSNR @ 30k
 PAPER_PSNR_30K: dict[str, float] = {
@@ -84,7 +94,7 @@ def _apply_overrides(overrides: list[str]) -> None:
         setattr(target, elements[-1], value)
 
 
-def _configure_training_run(iters: int) -> None:
+def _configure_training_run(iters: int, *, enable_timing: bool = True) -> None:
     Framework.config.TRAINING.NUM_ITERATIONS = int(iters)
     Framework.config.TRAINING.GUI.ACTIVATE = False
     Framework.config.TRAINING.DATA.PRELOADING_LEVEL = 1
@@ -92,9 +102,23 @@ def _configure_training_run(iters: int) -> None:
     Framework.config.TRAINING.BACKUP.RENDER_TESTSET = True
     Framework.config.TRAINING.BACKUP.INTERMEDIATE_RENDERINGS = True
     Framework.config.TRAINING.BACKUP.INTERVAL = int(iters)
+    if enable_timing:
+        Framework.config.TRAINING.TIMING.ACTIVATE = True
 
 
-def train_and_eval(config_path: str, iters: int, overrides: list[str]) -> Path:
+def _default_profile_iters(iters: int) -> list[int]:
+    """End-of-run step timing (matches final splat count)."""
+    return [max(0, iters - 1)] if iters > 0 else []
+
+
+def train_and_eval(
+    config_path: str,
+    iters: int,
+    overrides: list[str],
+    *,
+    profile_at: list[int] | None = None,
+    profile_repeats: int = 15,
+) -> Path:
     Framework.setup(config_path=config_path, require_custom_config=True)
     _apply_overrides(overrides)
     _configure_training_run(iters)
@@ -107,14 +131,26 @@ def train_and_eval(config_path: str, iters: int, overrides: list[str]) -> Path:
         f'eval run: scene={scene}, iters={iters}, path={Framework.config.DATASET.PATH}, '
         f'model={Framework.config.TRAINING.MODEL_NAME}'
     )
-    training_instance = MI.get_training_instance(
+    trainer = MI.get_training_instance(
         method=Framework.config.GLOBAL.METHOD_TYPE,
         checkpoint=Framework.config.TRAINING.LOAD_CHECKPOINT,
     )
     dataset = DI.get_dataset(Framework.config.GLOBAL.DATASET_TYPE, Framework.config.DATASET.PATH)
-    training_instance.run(dataset)
-    run_dir = Path(training_instance.output_directory)
-    print_report(run_dir, iters)
+    trainer.run(dataset)
+    run_dir = Path(trainer.output_directory)
+
+    profile_iters = profile_at
+    if profile_iters is None:
+        profile_iters = []
+    profiles = []
+    if profile_iters:
+        Logger.log_info(f'step profiling at iterations: {profile_iters}')
+        profiles = profile_training_steps(
+            trainer, dataset, profile_iters, repeats=profile_repeats,
+        )
+
+    collect_run_timings(run_dir, profile_steps=profiles or None)
+    print_report(run_dir, iters, step_profiles=profiles)
     Framework.teardown()
     return run_dir
 
@@ -148,7 +184,12 @@ def _scene_from_run_dir(run_dir: Path) -> str:
     return text
 
 
-def print_report(run_dir: Path, iters: int | None = None) -> dict[str, float]:
+def print_report(
+    run_dir: Path,
+    iters: int | None = None,
+    *,
+    step_profiles: list | None = None,
+) -> dict[str, float]:
     run_dir = run_dir.resolve()
     if iters is None:
         test_dirs = sorted(run_dir.glob('test_*'), key=lambda p: int(p.name.split('_', 1)[1]))
@@ -190,6 +231,26 @@ def print_report(run_dir: Path, iters: int | None = None) -> dict[str, float]:
         print(f'  worst views: {", ".join(f"#{i}={v:.1f}" for i, v in worst)}')
         print(f'  best views:  {", ".join(f"#{i}={v:.1f}" for i, v in best)}')
 
+    train = parse_timings_txt(run_dir / 'timings.txt')
+    train_line = format_train_timing(train)
+    if train_line:
+        print(f'  {train_line}')
+
+    profiles = step_profiles
+    if profiles is None and (run_dir / 'timing_summary.json').is_file():
+        import json
+        from faster2dgs_timings import StepProfile
+
+        data = json.loads((run_dir / 'timing_summary.json').read_text())
+        profiles = [StepProfile(**row) for row in data.get('step_profiles', [])]
+    if profiles:
+        for p in profiles:
+            print(f'  {format_step_profile(p)}')
+
+    summary = run_dir / 'timing_summary.json'
+    if summary.is_file() and (train_line or profiles):
+        print(f'  timing_summary: {summary}')
+
     return metrics
 
 
@@ -200,6 +261,19 @@ def main() -> None:
     parser.add_argument('-d', '--run-dir', type=Path, default=None, help='Existing output dir (render-only mode)')
     parser.add_argument('--checkpoint', type=str, default='final.pt', help='Checkpoint for render-only')
     parser.add_argument('--render-only', action='store_true', help='Skip training; render test set from checkpoint')
+    parser.add_argument(
+        '--profile-at',
+        type=int,
+        nargs='*',
+        default=None,
+        help='Profile end-of-run CUDA step time after training (default: off)',
+    )
+    parser.add_argument(
+        '--profile-default',
+        action='store_true',
+        help='Profile one training step at the final iteration (speed regression)',
+    )
+    parser.add_argument('--profile-repeats', type=int, default=15, help='Timed repeats per --profile-at iteration')
     parser.add_argument('overrides', nargs='*', help='Config overrides, e.g. DATASET.PATH=/path/to/scene')
     args, unknown = parser.parse_known_args()
     if unknown:
@@ -215,7 +289,16 @@ def main() -> None:
 
     if args.config is None:
         parser.error('training mode requires -c/--config')
-    train_and_eval(args.config, args.iters, args.overrides)
+    profile_at: list[int] | None = args.profile_at
+    if args.profile_default:
+        profile_at = _default_profile_iters(args.iters)
+    train_and_eval(
+        args.config,
+        args.iters,
+        args.overrides,
+        profile_at=profile_at,
+        profile_repeats=args.profile_repeats,
+    )
 
 
 if __name__ == '__main__':

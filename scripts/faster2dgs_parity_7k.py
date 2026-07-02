@@ -26,6 +26,7 @@ import utils
 
 with utils.DiscoverSourcePath():
     from faster2dgs_eval import PAPER_PSNR_30K, print_report, train_and_eval
+    from faster2dgs_timings import parse_timings_txt
 
 OFFICIAL_PYTHON = Path('/opt/anaconda3/envs/pytorch_simulon_env/bin/python')
 REPO = Path(__file__).resolve().parents[1]
@@ -51,6 +52,9 @@ class RunResult:
     psnr: float | None
     ssim: float | None
     splats: int | None
+    train_sec: float | None = None
+    ms_per_iter: float | None = None
+    step_ms: float | None = None
     log_tail: str = ''
 
 
@@ -71,7 +75,7 @@ def _parse_splats(run_dir: Path) -> int | None:
     return None
 
 
-def _collect_ours(scene: str, python: str) -> RunResult:
+def _collect_ours(scene: str, python: str, *, profile_default: bool) -> RunResult:
     meta = SCENES[scene]
     config = REPO / 'configs' / '2DGS_m360.yaml'
     path = DATASET_ROOT / scene
@@ -84,14 +88,32 @@ def _collect_ours(scene: str, python: str) -> RunResult:
     preload = os.environ.get('PRELOADING_LEVEL')
     if preload is not None:
         overrides.append(f'TRAINING.DATA.PRELOADING_LEVEL={preload}')
-    run_dir = train_and_eval(str(config), ITERS, overrides)
+    profile_at = [ITERS - 1] if profile_default else None
+    run_dir = train_and_eval(
+        str(config),
+        ITERS,
+        overrides,
+        profile_at=profile_at,
+    )
     metrics = _parse_metrics(run_dir / f'test_{ITERS}' / 'metrics_8bit.txt')
+    train = parse_timings_txt(run_dir / 'timings.txt')
+    step_ms = None
+    summary_path = run_dir / 'timing_summary.json'
+    if summary_path.is_file():
+        import json
+        data = json.loads(summary_path.read_text())
+        rows = data.get('step_profiles') or []
+        if rows:
+            step_ms = float(rows[-1]['total_ms'])
     return RunResult(
         label='Faster2DGS',
         run_dir=run_dir,
         psnr=metrics.get('PSNR'),
         ssim=metrics.get('SSIM'),
         splats=_parse_splats(run_dir),
+        train_sec=train.train_sec,
+        ms_per_iter=train.ms_per_iter,
+        step_ms=step_ms,
     )
 
 
@@ -165,15 +187,19 @@ def _print_table(scene: str, rows: list[RunResult]) -> None:
     paper = SCENES[scene]['paper']
     print(f'\n=== {scene} @ {ITERS} (photometric: λ_dist=0, normal off) ===')
     print(f'  paper reference @30k PSNR: {paper:.2f}')
-    print(f'  {"method":<16} {"PSNR":>7} {"SSIM":>7} {"splats":>10}  output')
+    print(f'  {"method":<16} {"PSNR":>7} {"SSIM":>7} {"splats":>10} {"ms/iter":>8} {"step":>8}  output')
     for r in rows:
         psnr = f'{r.psnr:.2f}' if r.psnr is not None else 'n/a'
         ssim = f'{r.ssim:.3f}' if r.ssim is not None else 'n/a'
         splats = f'{r.splats:,}' if r.splats is not None else 'n/a'
+        ms_iter = f'{r.ms_per_iter:.1f}' if r.ms_per_iter is not None else 'n/a'
+        step = f'{r.step_ms:.1f}' if r.step_ms is not None else 'n/a'
         out = str(r.run_dir) if r.run_dir else '-'
-        print(f'  {r.label:<16} {psnr:>7} {ssim:>7} {splats:>10}  {out}')
+        print(f'  {r.label:<16} {psnr:>7} {ssim:>7} {splats:>10} {ms_iter:>8} {step:>8}  {out}')
         if r.psnr is not None:
             print(f'    vs paper@30k: {r.psnr - paper:+.2f} dB')
+        if r.train_sec is not None:
+            print(f'    train: {r.train_sec:.0f}s total')
 
     ours = next((r for r in rows if r.label == 'Faster2DGS'), None)
     off = next((r for r in rows if r.label == 'official 2DGS'), None)
@@ -192,6 +218,11 @@ def main() -> None:
     parser.add_argument('--scene', choices=sorted(SCENES), required=True)
     parser.add_argument('--skip-ours', action='store_true')
     parser.add_argument('--skip-official', action='store_true')
+    parser.add_argument(
+        '--profile-default',
+        action='store_true',
+        help='After Faster2DGS train, profile one CUDA step at iter 6999 (~15 repeats)',
+    )
     parser.add_argument('--python', default=sys.executable, help='Python for Faster2DGS')
     parser.add_argument('--official-python', default=str(OFFICIAL_PYTHON), help='Python for official 2DGS')
     args = parser.parse_args()
@@ -199,7 +230,7 @@ def main() -> None:
     rows: list[RunResult] = []
     if not args.skip_ours:
         print(f'--- training Faster2DGS {args.scene} @ {ITERS} ---')
-        rows.append(_collect_ours(args.scene, args.python))
+        rows.append(_collect_ours(args.scene, args.python, profile_default=args.profile_default))
     if not args.skip_official:
         print(f'--- training official 2DGS {args.scene} @ {ITERS} ---')
         rows.append(_collect_official(args.scene, args.official_python))

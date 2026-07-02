@@ -4,7 +4,7 @@
 Run from ``scripts/``:
 
     python faster2dgs_profile_step.py
-    python faster2dgs_profile_step.py -c ../configs/gs_stump_2DGS.yaml --iters 3500 --profile-at 3100
+    python faster2dgs_profile_step.py -c ../configs/2DGS_m360.yaml --iters 3500 --profile-at 3100
     python faster2dgs_profile_step.py --profile-only --profile-at 1500 --repeats 50 --kernel-only
 """
 
@@ -25,6 +25,7 @@ with utils.DiscoverSourcePath():
     from Datasets.utils import apply_background_color, get_supervision_alpha
     from Implementations import Datasets as DI, Methods as MI
     from Methods.Faster2DGS.Faster2DGSCudaBackend import SurfelRasterizerSettings, diff_rasterize_surfel_with_aux
+    from Methods.Faster2DGS.Faster2DGSCudaBackend import SurfelAuxMode
     from Methods.FasterGS.Renderer import extract_settings
 
 
@@ -246,20 +247,24 @@ def profile_step(trainer, dataset, iteration: int, repeats: int, warmup: int) ->
         _accum('sample_view', t_sample.ms)
 
         renderer = trainer.renderer
-        photometric_only = not trainer._needs_aux_maps(iteration)
+        aux_mode = trainer._aux_mode(iteration)
         with CudaTimer() as t_rast:
             rgb, auxiliary_maps = renderer._rasterize_training(
-                view_i, update_dens, bg_i, photometric_only=photometric_only,
+                view_i, update_dens, bg_i, aux_mode=aux_mode,
             )
         _accum('rasterize_fwd', t_rast.ms)
 
-        if photometric_only:
+        if aux_mode == SurfelAuxMode.PHOTOMETRIC:
             render_pkg = {'rgb': rgb}
             if update_dens and hasattr(renderer, '_last_training_radii'):
                 render_pkg['radii'] = renderer._last_training_radii
         else:
             with CudaTimer() as t_aux:
-                parsed = renderer._training_outputs_from_aux(view_i, auxiliary_maps)
+                parsed = renderer._training_outputs_from_aux(
+                    view_i,
+                    auxiliary_maps,
+                    compute_surf_normal=trainer._needs_surf_normal(iteration),
+                )
                 render_pkg = {'rgb': rgb, **parsed}
                 if update_dens and hasattr(renderer, '_last_training_radii'):
                     render_pkg['radii'] = renderer._last_training_radii
@@ -375,7 +380,7 @@ def print_splat_summary(records: list[DensifyRecord], splats_now: int) -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description='Faster2DGS step profiler + splat count log')
-    p.add_argument('-c', '--config', default='../configs/gs_stump_2DGS.yaml', help='Training config yaml')
+    p.add_argument('-c', '--config', default='../configs/2DGS_m360.yaml', help='Training config yaml')
     p.add_argument('--dataset-path', type=str, default=None, help='Override DATASET.PATH (COLMAP root with sparse/0)')
     p.add_argument('--iters', type=int, default=3500, help='Training iters for splat-count log (0 = skip)')
     p.add_argument('--profile-at', type=int, default=3100, help='Iteration to profile (-1 = skip)')

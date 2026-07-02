@@ -28,6 +28,7 @@ with utils.DiscoverSourcePath():
         setup_trainer,
         validate_dataset_path,
     )
+    from Methods.Faster2DGS.Faster2DGSCudaBackend import SurfelAuxMode
 
 
 OFFICIAL_2DGS_SPLAT_REF = 400_000
@@ -36,7 +37,8 @@ OFFICIAL_2DGS_SPLAT_REF = 400_000
 @dataclass
 class KernelBench:
     splats: int
-    photometric_only: bool
+    aux_mode: int
+    label: str
     fwd_ms: float
     bwd_ms: float
     total_ms: float
@@ -71,7 +73,8 @@ def _bench_rasterizer(
     dataset,
     iteration: int,
     *,
-    photometric_only: bool,
+    aux_mode: int,
+    label: str,
     repeats: int,
     warmup: int,
 ) -> KernelBench:
@@ -98,12 +101,16 @@ def _bench_rasterizer(
 
         with CudaTimer() as t_fwd:
             rgb, auxiliary_maps = renderer._rasterize_training(
-                view, update_dens, bg, photometric_only=photometric_only,
+                view, update_dens, bg, aux_mode=aux_mode,
             )
-        if photometric_only:
+        if aux_mode == SurfelAuxMode.PHOTOMETRIC:
             render_pkg = {'rgb': rgb}
         else:
-            parsed = renderer._training_outputs_from_aux(view, auxiliary_maps)
+            parsed = renderer._training_outputs_from_aux(
+                view,
+                auxiliary_maps,
+                compute_surf_normal=trainer._needs_surf_normal(iteration),
+            )
             render_pkg = {'rgb': rgb, **parsed}
 
         with CudaTimer() as t_loss:
@@ -119,24 +126,29 @@ def _bench_rasterizer(
     bwd_ms = bwd_acc / repeats
     return KernelBench(
         splats=splats,
-        photometric_only=photometric_only,
+        aux_mode=aux_mode,
+        label=label,
         fwd_ms=fwd_ms,
         bwd_ms=bwd_ms,
         total_ms=fwd_ms + bwd_ms,
     )
 
 
-def _print_bench(label: str, full: KernelBench, photo: KernelBench) -> None:
-    speedup = full.total_ms / photo.total_ms if photo.total_ms > 0 else 0.0
-    print(f'\n=== {label} ({full.splats:,} splats) ===')
+def _print_bench(title: str, benches: list[KernelBench]) -> None:
+    if not benches:
+        return
+    splats = benches[0].splats
+    print(f'\n=== {title} ({splats:,} splats) ===')
     print(f'{"mode":<16} {"fwd+loss":>10} {"bwd":>10} {"total":>10} {"it/s":>8}')
     print('-' * 58)
-    for b in (full, photo):
-        tag = 'photometric' if b.photometric_only else 'full aux'
+    for b in benches:
         print(
-            f'{tag:<16} {b.fwd_ms:10.2f} {b.bwd_ms:10.2f} {b.total_ms:10.2f} {b.steps_per_s:8.1f}'
+            f'{b.label:<16} {b.fwd_ms:10.2f} {b.bwd_ms:10.2f} {b.total_ms:10.2f} {b.steps_per_s:8.1f}'
         )
-    print(f'photometric speedup: {speedup:.2f}x total step')
+    prod = next((b for b in benches if b.label == 'production'), None)
+    legacy = next((b for b in benches if b.label == 'legacy full'), None)
+    if prod and legacy and prod.total_ms > 0:
+        print(f'production vs legacy full: {legacy.total_ms / prod.total_ms:.2f}x faster')
 
 
 def _project_fastgs_parity(photo: KernelBench, target_splats: int = OFFICIAL_2DGS_SPLAT_REF) -> None:
@@ -154,7 +166,7 @@ def _project_fastgs_parity(photo: KernelBench, target_splats: int = OFFICIAL_2DG
 
 def main() -> int:
     parser = argparse.ArgumentParser(description='Faster2DGS speed experiment')
-    parser.add_argument('-c', '--config', default='../configs/gs_stump_2DGS.yaml')
+    parser.add_argument('-c', '--config', default='../configs/2DGS_m360.yaml')
     parser.add_argument('--dataset-path', default=None)
     parser.add_argument('--profile-at', type=int, nargs='+', default=[2000, 3100])
     parser.add_argument('--profile-only', action='store_true')
@@ -174,19 +186,39 @@ def main() -> int:
 
     for iteration in args.profile_at:
         advance_to(trainer, dataset, iteration)
-        needs_aux = trainer._needs_aux_maps(iteration)
-        print(f'\niter {iteration}: {trainer.model.gaussians.means.shape[0]:,} splats, needs_aux={needs_aux}')
+        prod_mode = trainer._aux_mode(iteration)
+        mode_names = {SurfelAuxMode.PHOTOMETRIC: 'photometric', SurfelAuxMode.DISTORTION: 'distortion', SurfelAuxMode.FULL: 'full'}
+        print(
+            f'\niter {iteration}: {trainer.model.gaussians.means.shape[0]:,} splats, '
+            f'aux_mode={mode_names.get(prod_mode, prod_mode)}'
+        )
 
-        full = _bench_rasterizer(
-            trainer, dataset, iteration,
-            photometric_only=False, repeats=args.repeats, warmup=args.warmup,
-        )
-        photo = _bench_rasterizer(
-            trainer, dataset, iteration,
-            photometric_only=True, repeats=args.repeats, warmup=args.warmup,
-        )
-        _print_bench(f'iter {iteration}', full, photo)
+        benches = [
+            _bench_rasterizer(
+                trainer, dataset, iteration,
+                aux_mode=prod_mode, label='production',
+                repeats=args.repeats, warmup=args.warmup,
+            ),
+        ]
+        if prod_mode != SurfelAuxMode.FULL:
+            benches.append(
+                _bench_rasterizer(
+                    trainer, dataset, iteration,
+                    aux_mode=SurfelAuxMode.FULL, label='legacy full',
+                    repeats=args.repeats, warmup=args.warmup,
+                )
+            )
+        if prod_mode != SurfelAuxMode.PHOTOMETRIC:
+            benches.append(
+                _bench_rasterizer(
+                    trainer, dataset, iteration,
+                    aux_mode=SurfelAuxMode.PHOTOMETRIC, label='photometric',
+                    repeats=args.repeats, warmup=args.warmup,
+                )
+            )
+        _print_bench(f'iter {iteration}', benches)
         if iteration < trainer.DISTORTION_START_ITERATION:
+            photo = next(b for b in benches if b.label == 'photometric')
             _project_fastgs_parity(photo)
 
     return 0

@@ -116,10 +116,10 @@ indoor kitchen: `DEPTH_RATIO=1`, `LAMBDA_DISTORTION=1000`, `images_2` / factor 0
 
 | Scene | Config | Paper PSNR |
 |-------|--------|------------|
-| bicycle | `configs/gs_bicycle_2DGS.yaml` | 24.87 |
-| stump | `configs/gs_stump_2DGS.yaml` | 26.47 |
-| kitchen | `configs/gs_kitchen_2DGS.yaml` | 30.50 |
-| garden | `configs/gs_garden_2DGS.yaml` | 26.95 |
+| bicycle | `2DGS_m360.yaml` + `DATASET.PATH=.../bicycle` | 24.87 |
+| stump | `2DGS_m360.yaml` + `DATASET.PATH=.../stump` | 26.47 |
+| kitchen | `2DGS_m360.yaml` + `DATASET.PATH=.../kitchen` | 30.50 |
+| garden | `2DGS_m360.yaml` + `DATASET.PATH=.../garden` | 26.95 |
 
 Run all four sequentially:
 
@@ -184,5 +184,5 @@ Validation: `scripts/faster2dgs_kernel_parity.py` (native smoke + timing).
 
 Acceptance checklist (plan Phase 6):
 - Kernel fwd+bwd smoke on stump (32k splats): no NaN, gradients non-zero.
-- Training: `python scripts/train.py -c configs/gs_stump_2DGS.yaml -s` with native backend log line.
+- Training: `python scripts/train.py -c configs/2DGS_m360.yaml DATASET.PATH=dataset/mipnerf360/stump` with native backend log line.
 - Paper parity: `python scripts/run_mip360_2dgs_benchmark.py` (bicycle 24.87 / stump 26.47 / kitchen 30.50 / garden 26.95 PSNR targets).

@@ -43,7 +43,7 @@ def time_fwd_bwd(g, view, settings, iters=30):
 
 
 def main():
-    Framework.setup(config_path='../configs/gs_stump_2DGS.yaml', require_custom_config=True)
+    Framework.setup(config_path='../configs/2DGS_m360.yaml', require_custom_config=True)
     Framework.config.TRAINING.GUI.ACTIVATE = False
     Framework.config.TRAINING.DATA.PRELOADING_LEVEL = 0
     ds = DI.get_dataset(Framework.config.GLOBAL.DATASET_TYPE, Framework.config.DATASET.PATH)

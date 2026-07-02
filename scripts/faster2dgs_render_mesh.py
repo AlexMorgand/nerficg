@@ -16,7 +16,16 @@ with utils.DiscoverSourcePath():
     from Implementations import Methods as MI
     from Implementations import Datasets as DI
     from Datasets.utils import save_image
-    from Methods.Faster2DGS.mesh_utils import mask_depth_for_fusion, post_process_mesh, resolve_tsdf_params
+    from Methods.Faster2DGS.mesh_utils import (
+        TsdfParams,
+        collect_valid_depth_values,
+        filter_depth_by_scene_sphere,
+        mask_depth_for_fusion,
+        open3d_pinhole_from_view,
+        post_process_mesh,
+        refine_depth_trunc_from_depths,
+        resolve_tsdf_params,
+    )
 
 
 def _require_open3d():
@@ -61,6 +70,12 @@ def main(
     export_buffers: bool,
     skip_post_process: bool,
     unbounded: bool,
+    depth_ratio: float | None,
+    config_overrides: list[str],
+    sphere_filter: bool,
+    sphere_scale: float,
+    depth_percentile: float,
+    depth_margin: float,
 ) -> None:
     if unbounded:
         raise Framework.InferenceError(
@@ -69,6 +84,18 @@ def main(
         )
 
     Framework.setup(config_path=str(base_dir / 'training_config.yaml'), require_custom_config=True)
+    for item in config_overrides:
+        key, value = item.split('=', 1)
+        elements = key.split('.')
+        target = Framework.config
+        for part in elements[:-1]:
+            target = getattr(target, part)
+        try:
+            import ast
+            value = ast.literal_eval(value)
+        except (ValueError, SyntaxError):
+            pass
+        setattr(target, elements[-1], value)
     if Framework.config.GLOBAL.METHOD_TYPE != 'Faster2DGS':
         raise Framework.InferenceError(f'Expected METHOD_TYPE=Faster2DGS, got {Framework.config.GLOBAL.METHOD_TYPE}')
 
@@ -98,6 +125,72 @@ def main(
         method=Framework.config.GLOBAL.METHOD_TYPE,
         model=model
     )
+    if depth_ratio is not None:
+        renderer.DEPTH_RATIO = float(depth_ratio)
+        Logger.log_info(f'mesh export DEPTH_RATIO override: {renderer.DEPTH_RATIO}')
+    elif renderer.DEPTH_RATIO == 0.0:
+        Logger.log_warning(
+            'DEPTH_RATIO=0 (mean depth). Bounded indoor meshing usually needs DEPTH_RATIO=1 '
+            '(median depth). Pass --depth_ratio 1 or train with configs/2DGS_mesh.yaml.'
+        )
+
+    auto_depth_trunc = depth_trunc <= 0.0
+    depth_samples: list[float] = []
+    if auto_depth_trunc and depth_percentile > 0.0:
+        prescan_views = fuse_views if n_frames <= 48 else fuse_views[:: max(1, n_frames // 48)]
+        Logger.log_info(
+            f'prescanning {len(prescan_views)}/{n_frames} views for auto depth_trunc '
+            f'(percentile={depth_percentile:.2f}, margin={depth_margin})'
+        )
+        with _diffuse_only_sh(model):
+            for view in Logger.log_progress(prescan_views, total=len(prescan_views), desc='depth prescan', leave=False):
+                outputs = renderer.render_image(view, to_chw=True)
+                depth = outputs.get('depth', None)
+                if depth is None:
+                    continue
+                depth = mask_depth_for_fusion(
+                    depth,
+                    view,
+                    alpha_threshold=alpha_threshold,
+                    use_gt_mask=use_gt_mask,
+                    rendered_alpha=outputs.get('alpha', None),
+                )
+                depth_samples.extend(
+                    collect_valid_depth_values(
+                        depth,
+                        outputs.get('alpha', None),
+                        alpha_threshold=alpha_threshold,
+                        depth_trunc=tsdf_params.depth_trunc,
+                    )
+                )
+        refined_trunc = refine_depth_trunc_from_depths(
+            radius=tsdf_params.radius,
+            camera_heuristic_trunc=tsdf_params.depth_trunc,
+            depth_samples=depth_samples,
+            percentile=depth_percentile,
+            margin=depth_margin,
+        )
+        resolved_voxel = voxel_size if voxel_size > 0.0 else refined_trunc / max(mesh_res, 1)
+        resolved_sdf = sdf_trunc if sdf_trunc > 0.0 else 5.0 * resolved_voxel
+        tsdf_params = TsdfParams(
+            center=tsdf_params.center,
+            radius=tsdf_params.radius,
+            depth_trunc=refined_trunc,
+            voxel_size=resolved_voxel,
+            sdf_trunc=resolved_sdf,
+        )
+        Logger.log_info(
+            f'refined TSDF params: depth_trunc={tsdf_params.depth_trunc:.4f}, '
+            f'voxel_size={tsdf_params.voxel_size:.6f}, sdf_trunc={tsdf_params.sdf_trunc:.6f}'
+        )
+
+    sphere_max_distance = sphere_scale * tsdf_params.radius if sphere_filter else 0.0
+    if sphere_filter:
+        Logger.log_info(
+            f'scene-sphere depth filter: max distance={sphere_max_distance:.4f} '
+            f'(center radius * {sphere_scale:.2f}, 2DGS uses depth_trunc=2*radius)'
+        )
+
     o3d = _require_open3d()
     tsdf = o3d.pipelines.integration.ScalableTSDFVolume(
         voxel_length=tsdf_params.voxel_size,
@@ -108,7 +201,7 @@ def main(
     output_root = base_dir / 'faster2dgs_export'
     output_root.mkdir(parents=True, exist_ok=True)
     if export_buffers:
-        for name in ('rgb', 'alpha', 'depth', 'normal'):
+        for name in ('rgb', 'alpha', 'depth', 'normal', 'surf_normal'):
             (output_root / name).mkdir(exist_ok=True)
 
     Logger.log_info(f'processing {n_frames} frames from subset "{subset}" (diffuse-only SH for fusion)')
@@ -121,6 +214,7 @@ def main(
             depth = outputs.get('depth', None)
             alpha = outputs.get('alpha', None)
             normal = outputs.get('normal', None)
+            surf_normal = outputs.get('surf_normal', None)
             if depth is None:
                 raise Framework.InferenceError('Renderer did not provide depth output, cannot fuse TSDF.')
 
@@ -142,6 +236,12 @@ def main(
                 use_gt_mask=use_gt_mask,
                 rendered_alpha=alpha,
             )
+            depth = filter_depth_by_scene_sphere(
+                depth,
+                view,
+                tsdf_params.center,
+                sphere_max_distance,
+            )
             depth = depth.clamp(0.0, tsdf_params.depth_trunc)
 
             if export_buffers:
@@ -154,6 +254,8 @@ def main(
                 )
                 if normal is not None:
                     save_image(output_root / 'normal' / f'{idx:05d}.png', normal.clamp(0.0, 1.0))
+                if surf_normal is not None:
+                    save_image(output_root / 'surf_normal' / f'{idx:05d}.png', surf_normal.clamp(0.0, 1.0))
 
             rgb_np = np.ascontiguousarray((rgb.permute(1, 2, 0).cpu().numpy() * 255.0).astype(np.uint8))
             depth_np = np.ascontiguousarray(depth[0].cpu().numpy().astype(np.float32))
@@ -166,15 +268,7 @@ def main(
                 depth_trunc=tsdf_params.depth_trunc,
                 convert_rgb_to_intensity=False,
             )
-            intrinsic = o3d.camera.PinholeCameraIntrinsic(
-                int(view.camera.width),
-                int(view.camera.height),
-                float(view.camera.focal_x),
-                float(view.camera.focal_y),
-                float(view.camera.center_x),
-                float(view.camera.center_y),
-            )
-            extrinsic = view.w2c.detach().cpu().numpy().astype(np.float64)
+            intrinsic, extrinsic = open3d_pinhole_from_view(view)
             tsdf.integrate(rgbd, intrinsic, extrinsic)
 
     mesh = tsdf.extract_triangle_mesh()
@@ -239,8 +333,38 @@ if __name__ == '__main__':
         help='Unbounded TSDF (MipNeRF360-style). Not implemented yet.',
     )
     parser.add_argument('--max_frames', type=int, default=-1, help='Max frames to process (-1 = all).')
+    parser.add_argument(
+        '--depth_ratio',
+        type=float,
+        default=None,
+        help='Override renderer DEPTH_RATIO for fusion (bounded indoor: 1.0, unbounded: 0.0).',
+    )
+    parser.add_argument(
+        '--no_sphere_filter',
+        action='store_true',
+        help='Disable world-space bounding-sphere depth filtering (2DGS uses camera depth_trunc only).',
+    )
+    parser.add_argument(
+        '--sphere_scale',
+        type=float,
+        default=2.0,
+        help='Keep backprojected points within sphere_scale * estimated scene radius (default 2.0, matches 2DGS depth_trunc factor).',
+    )
+    parser.add_argument(
+        '--depth_percentile',
+        type=float,
+        default=0.99,
+        help='When depth_trunc is auto, tighten using this rendered-depth quantile (<=0 disables prescan).',
+    )
+    parser.add_argument(
+        '--depth_margin',
+        type=float,
+        default=1.05,
+        help='Multiplier applied to the depth percentile when refining auto depth_trunc.',
+    )
     parser.add_argument('--no_export_buffers', action='store_true', help='Disable saving rgb/depth/normal/alpha PNGs.')
-    args, _ = parser.parse_known_args()
+    args, unknown = parser.parse_known_args()
+    config_overrides = list(unknown)
     Logger.set_mode(Logger.MODE_VERBOSE)
     main(
         base_dir=Path(args.base_dir),
@@ -257,4 +381,10 @@ if __name__ == '__main__':
         export_buffers=not args.no_export_buffers,
         skip_post_process=args.skip_post_process,
         unbounded=args.unbounded,
+        depth_ratio=args.depth_ratio,
+        config_overrides=config_overrides,
+        sphere_filter=not args.no_sphere_filter,
+        sphere_scale=args.sphere_scale,
+        depth_percentile=args.depth_percentile,
+        depth_margin=args.depth_margin,
     )

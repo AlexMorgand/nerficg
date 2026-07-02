@@ -1,16 +1,18 @@
-# Faster2DGS — MipNeRF360 preset matching official 2DGS m360_eval.py.
+# Faster2DGS — photometric preset (M360 PSNR parity, official m360_eval.py).
 #
-# Official only differs by image folder (not λ_dist / depth_ratio):
-#   outdoor scenes → images_4  (IMAGE_SCALE_FACTOR=0.25)
-#   indoor scenes  → images_2  (IMAGE_SCALE_FACTOR=0.5)
+# λ_dist=0, depth_ratio=0 — best novel-view RGB; NOT for mesh export.
+# Mesh / TSDF / bounded geometry → configs/2DGS_mesh.yaml
 #
-# train.py defaults: lambda_dist=0, depth_ratio=0, no PCA pose alignment.
+# MipNeRF360 resolution (official image folders):
+#   outdoor → IMAGE_SCALE_FACTOR=0.25  (images_4)
+#   indoor  → IMAGE_SCALE_FACTOR=0.5   (images_2)
 #
 # Examples:
 #   python scripts/train.py -c configs/2DGS_m360.yaml \
 #       DATASET.PATH=dataset/mipnerf360/kitchen DATASET.IMAGE_SCALE_FACTOR=0.5
 #   python scripts/train.py -c configs/2DGS_m360.yaml \
-#       DATASET.PATH=dataset/mipnerf360/garden DATASET.IMAGE_SCALE_FACTOR=0.25
+#       GLOBAL.DATASET_TYPE=Colmap \
+#       'DATASET.PATH=livingroom_take2/undistort' DATASET.IMAGE_SCALE_FACTOR=0.5
 
 GLOBAL:
     LOG_LEVEL: 2
@@ -52,6 +54,8 @@ TRAINING:
         INTERVAL: -1
         TRAINING_STATE: false
     WANDB:
+        ACTIVATE: false
+    TIMING:
         ACTIVATE: false
     GUI:
         ACTIVATE: false

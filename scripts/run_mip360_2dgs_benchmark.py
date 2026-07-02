@@ -1,18 +1,18 @@
 #! /usr/bin/env python3
-"""Run MipNeRF360 Faster2DGS benchmark configs and compare PSNR to the 2DGS paper."""
+"""Run MipNeRF360 Faster2DGS photometric benchmark and compare PSNR to the 2DGS paper."""
 
 from __future__ import annotations
 
 import argparse
 import re
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
 import utils
 
 with utils.DiscoverSourcePath():
-    import Framework
-    import train
     from Logging import Logger
 
 # 2DGS paper Table 1 (MipNeRF360 test PSNR)
@@ -23,12 +23,15 @@ PAPER_PSNR = {
     'kitchen': 30.50,
 }
 
-DEFAULT_CONFIGS = [
-    'configs/gs_bicycle_2DGS.yaml',
-    'configs/gs_stump_2DGS.yaml',
-    'configs/gs_kitchen_2DGS.yaml',
-    'configs/gs_garden_2DGS.yaml',
-]
+# scene → (IMAGE_SCALE_FACTOR, outdoor|indoor)
+M360_SCENES: dict[str, float] = {
+    'bicycle': 0.25,
+    'garden': 0.25,
+    'stump': 0.25,
+    'kitchen': 0.5,
+}
+
+CONFIG_REL = 'configs/2DGS_m360.yaml'
 
 
 def _parse_metrics(metrics_path: Path) -> dict[str, float]:
@@ -42,35 +45,52 @@ def _parse_metrics(metrics_path: Path) -> dict[str, float]:
     return out
 
 
-def _scene_name(config_path: Path) -> str:
-    stem = config_path.stem
-    for scene in PAPER_PSNR:
-        if scene in stem:
-            return scene
-    return stem
+def _find_latest_run(repo_root: Path, model_name: str) -> Path | None:
+    base = repo_root / 'output' / 'Faster2DGS'
+    if not base.is_dir():
+        return None
+    matches = sorted(base.glob(f'{model_name}_*'), key=lambda p: p.stat().st_mtime, reverse=True)
+    return matches[0] if matches else None
 
 
-def run_benchmark(config_paths: list[Path], output_root: Path | None) -> None:
+def run_benchmark(scenes: list[str], output_root: Path | None) -> None:
     repo_root = Path(__file__).resolve().parents[1]
+    config_path = repo_root / CONFIG_REL
     if output_root is None:
         output_root = repo_root / 'output' / f'mip360_2dgs_benchmark_{datetime.now():%Y-%m-%d-%H-%M-%S}'
     output_root.mkdir(parents=True, exist_ok=True)
 
     rows: list[tuple[str, float | None, float, str]] = []
-    for config_path in config_paths:
-        config_path = config_path if config_path.is_absolute() else repo_root / config_path
-        scene = _scene_name(config_path)
+    for scene in scenes:
+        if scene not in M360_SCENES:
+            Logger.log_warning(f'unknown scene {scene}, skipping')
+            continue
+        scale = M360_SCENES[scene]
         paper = PAPER_PSNR.get(scene, float('nan'))
-        Logger.log_info(f'=== training {scene} ({config_path.name}) ===')
+        model_name = f'{scene}_m360_bench'
+        dataset_path = f'dataset/mipnerf360/{scene}'
+        Logger.log_info(f'=== training {scene} ({CONFIG_REL}, scale={scale}) ===')
+        cmd = [
+            sys.executable,
+            str(repo_root / 'scripts' / 'train.py'),
+            '-c', str(config_path),
+            f'DATASET.PATH={dataset_path}',
+            f'DATASET.IMAGE_SCALE_FACTOR={scale}',
+            f'TRAINING.MODEL_NAME={model_name}',
+            'TRAINING.GUI.ACTIVATE=False',
+        ]
         try:
-            training_instance = train.main(config_path=str(config_path))
-        except Exception as exc:
+            subprocess.run(cmd, cwd=str(repo_root), check=True)
+        except subprocess.CalledProcessError as exc:
             Logger.log_error(f'{scene} failed: {exc}')
             rows.append((scene, None, paper, str(exc)))
             continue
 
-        run_dir = Path(training_instance.output_directory)
-        metrics_path = run_dir / f'test_{training_instance.NUM_ITERATIONS}' / 'metrics_8bit.txt'
+        run_dir = _find_latest_run(repo_root, model_name)
+        if run_dir is None:
+            rows.append((scene, None, paper, 'output directory not found'))
+            continue
+        metrics_path = run_dir / 'test_30000' / 'metrics_8bit.txt'
         metrics = _parse_metrics(metrics_path)
         psnr = metrics.get('PSNR')
         delta = (psnr - paper) if psnr is not None else float('nan')
@@ -93,17 +113,17 @@ def run_benchmark(config_paths: list[Path], output_root: Path | None) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description='MipNeRF360 Faster2DGS paper comparison')
+    parser = argparse.ArgumentParser(description='MipNeRF360 Faster2DGS photometric paper comparison')
     parser.add_argument(
-        '-c', '--configs', nargs='*', default=DEFAULT_CONFIGS,
-        help='Training config paths (default: four gs_*_2DGS.yaml scenes)',
+        '--scenes', nargs='*', default=list(M360_SCENES.keys()),
+        help=f'Scenes to train (default: {list(M360_SCENES.keys())})',
     )
     parser.add_argument(
         '-o', '--output-root', type=Path, default=None,
         help='Directory for benchmark summary file',
     )
     args = parser.parse_args()
-    run_benchmark([Path(p) for p in args.configs], args.output_root)
+    run_benchmark(list(args.scenes), args.output_root)
 
 
 if __name__ == '__main__':

@@ -122,7 +122,7 @@ def bench_fastergs(trainer, dataset, warmup: int, repeats: int) -> tuple[int, fl
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument('-c', '--config', default='../configs/gs_stump_2DGS.yaml')
+    p.add_argument('-c', '--config', default='../configs/2DGS_m360.yaml')
     p.add_argument('--advance-to', type=int, default=0, help='Train callbacks before timing')
     p.add_argument('--method', choices=('both', 'Faster2DGS', 'FasterGS'), default='both')
     p.add_argument('--warmup', type=int, default=5)

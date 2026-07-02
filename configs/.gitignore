@@ -2,6 +2,5 @@
 !.gitignore
 !gs_garden.yaml
 !2DGS_*.yaml
-!gs_*_2DGS.yaml
 !nerf_lego.yaml
 !ingp_lego.yaml

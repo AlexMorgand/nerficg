@@ -1,6 +1,30 @@
-# Faster2DGS MipNeRF360 kitchen (indoor) — paper PSNR ~30.50
-# Official 2DGS: images_2 (0.5), DEPTH_RATIO=1, lambda_dist=1000
-#   python scripts/train.py -c configs/gs_kitchen_2DGS.yaml
+# Faster2DGS — mesh / geometry preset (bounded TSDF, official 2DGS paper recipe).
+#
+# Use for COLMAP captures, living-room scenes, M360 mesh @30k, etc.
+# Pair with: python scripts/faster2dgs_render_mesh.py -d output/Faster2DGS/<run>
+#
+# Photometric-only / M360 PSNR parity → configs/2DGS_m360.yaml
+#
+# Examples (from repo root; quote paths that contain /):
+#
+#   # Bounded indoor COLMAP (default: median depth, λ_dist=1000)
+#   python scripts/train.py -c configs/2DGS_mesh.yaml \
+#       'DATASET.PATH=livingroom_take2/undistort' \
+#       DATASET.IMAGE_SCALE_FACTOR=0.5
+#
+#   # MipNeRF360 kitchen (mesh @30k, paper geometry)
+#   python scripts/train.py -c configs/2DGS_mesh.yaml \
+#       GLOBAL.DATASET_TYPE=MipNeRF360 \
+#       DATASET.PATH=dataset/mipnerf360/kitchen \
+#       DATASET.IMAGE_SCALE_FACTOR=0.5
+#
+#   # Outdoor / unbounded (override on CLI)
+#   python scripts/train.py -c configs/2DGS_mesh.yaml \
+#       GLOBAL.DATASET_TYPE=MipNeRF360 \
+#       DATASET.PATH=dataset/mipnerf360/garden \
+#       DATASET.IMAGE_SCALE_FACTOR=0.25 \
+#       RENDERER.DEPTH_RATIO=0 \
+#       TRAINING.LOSS.LAMBDA_DISTORTION=100
 
 GLOBAL:
     LOG_LEVEL: 2
@@ -10,7 +34,7 @@ GLOBAL:
     ANOMALY_DETECTION: false
     FILTER_WARNINGS: true
     METHOD_TYPE: Faster2DGS
-    DATASET_TYPE: MipNeRF360
+    DATASET_TYPE: Colmap
 
 MODEL:
     SH_DEGREE: 3
@@ -20,11 +44,14 @@ RENDERER:
     PROPER_ANTIALIASING: false
     FORCE_OPTIMIZED_INFERENCE: false
     REQUIRE_TRUE_2DGS_KERNEL: false
+    # 1 = median depth (bounded indoor / mesh); 0 = mean (outdoor unbounded)
     DEPTH_RATIO: 1.0
+    INCLUDE_SPLAT_DEBUG: false
+    SPLAT_DEBUG_UNIFORM_OPACITY: 1.0
 
 TRAINING:
     LOAD_CHECKPOINT: null
-    MODEL_NAME: kitchen_faster2dgs
+    MODEL_NAME: faster2dgs_mesh
     NUM_ITERATIONS: 30_000
     RUN_VALIDATION: false
     DATA:
@@ -43,10 +70,15 @@ TRAINING:
         TRAINING_STATE: false
     WANDB:
         ACTIVATE: false
+    TIMING:
+        ACTIVATE: false
     GUI:
-        ACTIVATE: true
+        ACTIVATE: false
         RENDER_INTERVAL: 5
+        GUI_STATUS_ENABLED: true
+        GUI_STATUS_INTERVAL: 20
         SKIP_GUI_SETUP: true
+        FPS_ROLLING_AVERAGE_SIZE: 100
 
     DENSIFICATION_START_ITERATION: 500
     DENSIFICATION_END_ITERATION: 15_000
@@ -71,12 +103,14 @@ TRAINING:
         USE: false
     USE_RANDOM_BACKGROUND_COLOR: false
     RANDOM_BACKGROUND_IF_ALPHA_OR_MASK: true
+    EXTERNAL_MASKS_PATH: null
     NORMALIZE_LOSS_BY_MASK_AREA: true
     MIN_OPACITY_AFTER_TRAINING: 0.05
 
     LOSS:
         LAMBDA_L1: 0.8
         LAMBDA_DSSIM: 0.2
+        # Paper α: 1000 bounded indoor, 100 unbounded outdoor
         LAMBDA_DISTORTION: 1000.0
         LAMBDA_NORMAL: 0.05
         LAMBDA_DEPTH_SMOOTHNESS: 0.0
@@ -95,7 +129,7 @@ TRAINING:
         LEARNING_RATE_ROTATIONS: 0.001
 
 DATASET:
-    PATH: /home/alex/Simulon/data/Misc/MipNerf/360_v2/kitchen
+    PATH: dataset/your_scene
     IMAGE_SCALE_FACTOR: 0.5
     NORMALIZE_CUBE: null
     NORMALIZE_RECENTER: false

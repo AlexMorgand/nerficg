@@ -3,7 +3,7 @@
 
 Run from ``scripts/``:
 
-    python faster2dgs_densify_compare.py -c ../configs/gs_stump_2DGS.yaml --iters 3500
+    python faster2dgs_densify_compare.py -c ../configs/2DGS_m360.yaml --iters 3500
     python faster2dgs_densify_compare.py --iters 7000 --milestones 500,1000,1700,3000,3500,7000
 """
 
@@ -173,7 +173,7 @@ def write_csv(rows: list[DensifyRow], path: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description='Faster2DGS densify parity log')
-    parser.add_argument('-c', '--config', default='../configs/gs_stump_2DGS.yaml')
+    parser.add_argument('-c', '--config', default='../configs/2DGS_m360.yaml')
     parser.add_argument('--dataset-path', default=None)
     parser.add_argument('--iters', type=int, default=3500)
     parser.add_argument('--milestones', default='500,1000,1700,3000,3500,7000')
