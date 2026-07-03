@@ -266,6 +266,8 @@ class Faster2DGSTrainer(FasterGSTrainer):
         self.model.gaussians.optimizer.step()
         self.model.gaussians.optimizer.zero_grad(set_to_none=True)
         self.model.gaussians.post_optimizer_step(inject_noise=self.USE_MCMC)
+        if self.model.ppisp is not None:
+            self.model.ppisp.step()
         if (
             self.GEOMETRY_LOG_INTERVAL > 0
             and iteration % self.GEOMETRY_LOG_INTERVAL == 0

@@ -36,6 +36,10 @@ class Faster2DGSLoss(BaseLoss):
         self.add_loss_metric('PLANAR_SPLAT_REGULARIZATION', self.planar_splat_regularization_loss, loss_config.LAMBDA_PLANAR_SPLAT)
         self.add_loss_metric('OPACITY_REGULARIZATION', model.gaussians.opacity_regularization_loss, loss_config.LAMBDA_OPACITY_REGULARIZATION)
         self.add_loss_metric('SCALE_REGULARIZATION', model.gaussians.scale_regularization_loss, loss_config.LAMBDA_SCALE_REGULARIZATION)
+        if model.ppisp is None:
+            self.add_loss_metric('PPISP_REGULARIZATION', lambda: 0.0, 0.0)
+        else:
+            self.add_loss_metric('PPISP_REGULARIZATION', model.ppisp.model.get_regularization_loss, 1.0)
         self.add_quality_metric('PSNR', torchmetrics.functional.image.peak_signal_noise_ratio)
 
     def set_geometry_loss_weights(
@@ -118,6 +122,7 @@ class Faster2DGSLoss(BaseLoss):
             'PLANAR_SPLAT_REGULARIZATION': {},
             'OPACITY_REGULARIZATION': {},
             'SCALE_REGULARIZATION': {},
+            'PPISP_REGULARIZATION': {},
             'PSNR': {'preds': render_pkg['rgb'], 'target': target, 'data_range': 1.0}
         })
         if self.training:

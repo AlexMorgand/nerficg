@@ -85,6 +85,11 @@ class Faster2DGSRenderer(FasterGSRenderer):
             )
         Logger.log_info('Faster2DGS using native Faster2DGSCudaBackend surfel rasterizer.')
 
+    def _apply_ppisp(self, rgb: torch.Tensor, view: View, *, clamp: bool = False) -> torch.Tensor:
+        if self.model.ppisp is not None:
+            return self.model.ppisp(rgb, view)
+        return rgb.clamp(0.0, 1.0) if clamp else rgb
+
     def _rasterize_training(
         self,
         view: View,
@@ -190,14 +195,14 @@ class Faster2DGSRenderer(FasterGSRenderer):
             else (SurfelAuxMode.PHOTOMETRIC if photometric_only else SurfelAuxMode.FULL)
         )
         if resolved_aux == SurfelAuxMode.PHOTOMETRIC:
-            out = {'rgb': rgb}
+            out = {'rgb': self._apply_ppisp(rgb, view)}
         else:
             parsed = self._training_outputs_from_aux(
                 view,
                 auxiliary_maps,
                 compute_surf_normal=compute_surf_normal,
             )
-            out = {'rgb': rgb, **parsed}
+            out = {'rgb': self._apply_ppisp(rgb, view), **parsed}
         if update_densification_info and hasattr(self, '_last_training_radii'):
             out['radii'] = self._last_training_radii
         return out
@@ -222,8 +227,10 @@ class Faster2DGSRenderer(FasterGSRenderer):
             view=view,
             scale_modifier=self.SCALE_MODIFIER,
             to_chw=to_chw,
-            clamp_output=True,
+            clamp_output=self.model.ppisp is None,
         )
+        if self.model.ppisp is not None:
+            image = self._apply_ppisp(image, view, clamp=True)
         return {'rgb': image}
 
     @torch.no_grad()
@@ -271,7 +278,7 @@ class Faster2DGSRenderer(FasterGSRenderer):
             torch.nn.functional.normalize(surf_normal, dim=0, eps=1e-6).nan_to_num(0.0) * 0.5 + 0.5
         ).clamp(0.0, 1.0)
         out = {
-            'rgb': rgb.clamp(0.0, 1.0),
+            'rgb': self._apply_ppisp(rgb, view, clamp=True),
             'alpha': rend_alpha,
             'depth': depth,
             'normal': normal_vis,
@@ -280,6 +287,31 @@ class Faster2DGSRenderer(FasterGSRenderer):
         if self.INCLUDE_SPLAT_DEBUG:
             out['splats'] = self._render_splat_debug(view)
         return self._pack_inference_outputs(out, to_chw=to_chw)
+
+    def ppisp_controller_distillation(self, view: View) -> torch.Tensor:
+        """Surfel RGB for PPISP controller distillation (gradients only through PPISP)."""
+        settings = extract_settings(
+            view,
+            self.model.gaussians.active_sh_bases,
+            view.camera.background_color,
+            self.PROPER_ANTIALIASING,
+        )
+        image = rasterize_surfel(
+            means=self.model.gaussians.means,
+            raw_scales_2d=self.model.gaussians.raw_scales_2d,
+            rotations=self.model.gaussians.raw_rotations,
+            opacities=self.model.gaussians.raw_opacities,
+            sh_coefficients_0=self.model.gaussians.sh_coefficients_0,
+            sh_coefficients_rest=self.model.gaussians.sh_coefficients_rest,
+            rasterizer_settings=RasterizerSettings(*settings),
+            view=view,
+            scale_modifier=self.SCALE_MODIFIER,
+            to_chw=True,
+            clamp_output=False,
+        )
+        if self.model.ppisp is None:
+            raise Framework.RendererError('ppisp_controller_distillation requires MODEL.PPISP.USE=true')
+        return self.model.ppisp(image, view)
 
     def postprocess_outputs(self, outputs: dict[str, torch.Tensor], view: View, dataset, index: int) -> dict[str, torch.Tensor]:
         out = super().postprocess_outputs(outputs, view, dataset, index)
