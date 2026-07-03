@@ -91,6 +91,8 @@ python scripts/faster2dgs_render_mesh.py -d output/Faster2DGS/<run_dir> \
 
 Pass dataset overrides if `training_config.yaml` in the run dir has the wrong path. Buffer sanity: `scripts/faster2dgs_sanity_buffers.py`.
 
+**External masks (COLMAP):** set `DATASET.EXTERNAL_MASKS_PATH` to a folder of per-image masks (matched to `images/` filenames). Use `EXTERNAL_MASKS_BINARY: false` for soft ViTMatte masks. Masks apply to training loss compositing and TSDF depth masking (default on). Legacy `TRAINING.EXTERNAL_MASKS_PATH` is forwarded to `DATASET` at startup.
+
 **Depth filtering (bounded TSDF, 2DGS-aligned + extras):**
 
 | Stage | What it does |

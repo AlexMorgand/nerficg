@@ -11,7 +11,7 @@ from Cameras.Perspective import PerspectiveCamera
 from Cameras.utils import RadialTangentialDistortion
 from Datasets.Base import BaseDataset
 from Datasets.utils import compute_scaled_image_size, View, ImageData, transform_poses_pca, BasicPointCloud, \
-    load_inverted_segmentation_mask, load_external_binary_mask, load_disparity, apply_image_scale_factor, \
+    load_inverted_segmentation_mask, load_external_binary_mask, load_external_soft_mask, load_disparity, apply_image_scale_factor, \
     load_optical_flow, apply_image_scale_factor_optical_flow, estimate_near_far, resolve_external_mask_path
 from Logging import Logger
 
@@ -23,7 +23,8 @@ from Logging import Logger
     SFM_POINTS_FILTER_RATIO=1.0,  # 0.95 works well in practice
     AABB_TOLERANCE_FACTOR=0.05,  # framework default is 0.1
     ESTIMATE_NEAR_FAR_FROM_SFM_POINTS=False,  # works well with methods that rely on tight near and far bounds
-    EXTERNAL_MASKS_PATH=None,  # directory of per-image binary masks (0 ignore / 255 keep), matched to RGB filenames
+    EXTERNAL_MASKS_PATH=None,  # directory of per-image masks matched to RGB filenames
+    EXTERNAL_MASKS_BINARY=True,  # True: threshold at 0.5; False: soft alpha (e.g. ViTMatte)
 )
 class CustomDataset(BaseDataset):
     """Dataset class for scenes in COLMAP format."""
@@ -117,10 +118,11 @@ class CustomDataset(BaseDataset):
                         raise Framework.DatasetError(
                             f'no external mask found for image "{rgb_path}" in "{external_masks_root}"'
                         )
+                    mask_load_fn = load_external_binary_mask if self.EXTERNAL_MASKS_BINARY else load_external_soft_mask
                     segmentation = ImageData(
                         mask_path,
                         n_channels=1, scale_factor=self.IMAGE_SCALE_FACTOR,
-                        load_fn=load_external_binary_mask,
+                        load_fn=mask_load_fn,
                         resize_fn=partial(apply_image_scale_factor, mode='nearest'),
                     )
                 elif has_sfm_masks:

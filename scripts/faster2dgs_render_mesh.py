@@ -96,6 +96,7 @@ def main(
         except (ValueError, SyntaxError):
             pass
         setattr(target, elements[-1], value)
+    Framework.sync_dataset_external_masks()
     if Framework.config.GLOBAL.METHOD_TYPE != 'Faster2DGS':
         raise Framework.InferenceError(f'Expected METHOD_TYPE=Faster2DGS, got {Framework.config.GLOBAL.METHOD_TYPE}')
 

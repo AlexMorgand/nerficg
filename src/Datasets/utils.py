@@ -197,6 +197,14 @@ def load_external_binary_mask(path: Path) -> torch.Tensor:
     return (mask > 0.5).float()
 
 
+def load_external_soft_mask(path: Path) -> torch.Tensor:
+    """Loads a mask image as soft alpha in [0, 1] (e.g. ViTMatte outputs)."""
+    mask = load_image_simple(path)
+    if mask.shape[0] > 1:
+        mask = mask[:1]
+    return mask.clamp(0.0, 1.0)
+
+
 def resolve_external_mask_path(mask_root: Path, rgb_path: Path, images_root: Path) -> Path | None:
     """Returns a mask file path matching the RGB image name, or None if not found."""
     image_name = rgb_path.name

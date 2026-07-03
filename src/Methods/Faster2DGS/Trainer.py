@@ -93,6 +93,13 @@ class Faster2DGSTrainer(FasterGSTrainer):
         """``depth_to_normal`` is only required when normal or depth-smoothness losses are active."""
         return self._normal_scale(iteration) > 0.0 or self._depth_smoothness_scale(iteration) > 0.0
 
+    def _select_bg_color(self, view) -> torch.Tensor:
+        if self.USE_RANDOM_BACKGROUND_COLOR:
+            return torch.rand_like(view.camera.background_color)
+        if getattr(self, 'RANDOM_BACKGROUND_IF_ALPHA_OR_MASK', False) and get_supervision_alpha(view) is not None:
+            return torch.rand_like(view.camera.background_color)
+        return view.camera.background_color
+
     def _should_densify(self, iteration: int) -> bool:
         return (
             not self.USE_MCMC
@@ -228,7 +235,7 @@ class Faster2DGSTrainer(FasterGSTrainer):
             planar_splat_scale=self._planar_splat_scale(iteration),
         )
         view = self.train_sampler.get(dataset=dataset)['view']
-        bg_color = torch.rand_like(view.camera.background_color) if self.USE_RANDOM_BACKGROUND_COLOR else view.camera.background_color
+        bg_color = self._select_bg_color(view)
         render_pkg = self.renderer.render_image_training(
             view=view,
             update_densification_info=not self.USE_MCMC and iteration < self.DENSIFICATION_END_ITERATION,

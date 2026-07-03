@@ -198,6 +198,21 @@ def load_config(config_path: Path, require_custom_config: bool, config_args: dic
             raise FrameworkError(f'invalid config file key "{key}" in config overwrite argument "{config_arg}={value}"')
         setattr(target_munch, param_name, value)
 
+    sync_dataset_external_masks()
+
+
+def sync_dataset_external_masks() -> None:
+    """Copy TRAINING mask settings onto DATASET when only set on TRAINING (legacy configs)."""
+    if not hasattr(config, 'DATASET') or not hasattr(config, 'TRAINING'):
+        return
+    for key in ('EXTERNAL_MASKS_PATH', 'EXTERNAL_MASKS_BINARY'):
+        if not hasattr(config.TRAINING, key):
+            continue
+        training_val = getattr(config.TRAINING, key)
+        dataset_val = getattr(config.DATASET, key, None)
+        if training_val not in (None, '') and dataset_val in (None, ''):
+            config.DATASET[key] = training_val
+
 
 def get_default_global_config() -> ConfigParameterList:
     """Returns the default values of all global configuration parameters."""

@@ -12,6 +12,12 @@
 #       'DATASET.PATH=livingroom_take2/undistort' \
 #       DATASET.IMAGE_SCALE_FACTOR=0.5
 #
+#   # With external masks (binary or soft ViTMatte)
+#   python scripts/train.py -c configs/2DGS_mesh.yaml \
+#       'DATASET.PATH=your_scene/undistort' \
+#       'DATASET.EXTERNAL_MASKS_PATH=your_scene/masks' \
+#       DATASET.EXTERNAL_MASKS_BINARY=false
+#
 #   # MipNeRF360 kitchen (mesh @30k, paper geometry)
 #   python scripts/train.py -c configs/2DGS_mesh.yaml \
 #       GLOBAL.DATASET_TYPE=MipNeRF360 \
@@ -103,7 +109,6 @@ TRAINING:
         USE: false
     USE_RANDOM_BACKGROUND_COLOR: false
     RANDOM_BACKGROUND_IF_ALPHA_OR_MASK: true
-    EXTERNAL_MASKS_PATH: null
     NORMALIZE_LOSS_BY_MASK_AREA: true
     MIN_OPACITY_AFTER_TRAINING: 0.05
 
@@ -142,3 +147,6 @@ DATASET:
     TEST_STEP: 8
     APPLY_PCA: true
     APPLY_PCA_RESCALE: false
+    # Per-image masks (0=ignore, 255=keep). Filenames matched to images/ (see Colmap dataset).
+    EXTERNAL_MASKS_PATH: null
+    EXTERNAL_MASKS_BINARY: true

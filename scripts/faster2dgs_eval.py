@@ -92,6 +92,7 @@ def _apply_overrides(overrides: list[str]) -> None:
         except (ValueError, SyntaxError):
             pass
         setattr(target, elements[-1], value)
+    Framework.sync_dataset_external_masks()
 
 
 def _configure_training_run(iters: int, *, enable_timing: bool = True) -> None:
