@@ -203,6 +203,29 @@ def load_external_soft_mask(path: Path) -> torch.Tensor:
     return mask.clamp(0.0, 1.0)
 
 
+def check_external_mask_tensor(
+    mask: torch.Tensor,
+    rgb: torch.Tensor,
+    label: str,
+    *,
+    binary: bool = True,
+) -> torch.Tensor:
+    """Validate external mask shape against RGB and optionally binarize it."""
+    if mask.ndim != rgb.ndim:
+        raise ValueError(
+            f'external mask for {label} has rank {mask.ndim}, expected {rgb.ndim}'
+        )
+    if mask.shape[-2:] != rgb.shape[-2:]:
+        raise ValueError(
+            f'external mask for {label} has spatial size {tuple(mask.shape[-2:])}, '
+            f'expected {tuple(rgb.shape[-2:])}'
+        )
+    mask = mask.clamp(0.0, 1.0)
+    if binary:
+        return (mask > 0.5).float()
+    return mask
+
+
 def resolve_external_mask_path(mask_root: Path, rgb_path: Path, images_root: Path) -> Path | None:
     """Returns a mask file path matching the RGB image name, or None if not found."""
     image_name = rgb_path.name
