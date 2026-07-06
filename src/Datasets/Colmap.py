@@ -109,7 +109,7 @@ class CustomDataset(BaseDataset):
             # create View instances
             n_views = len(images)
             last_view_idx = n_views - 1
-            idx2timestamp = 1 / last_view_idx
+            idx2timestamp = 1 / last_view_idx if last_view_idx > 0 else 0.0
             for frame_idx, image in enumerate(images):
                 rgb_path = images_root / image.name
                 if external_masks_root is not None:

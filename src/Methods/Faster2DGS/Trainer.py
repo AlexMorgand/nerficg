@@ -315,7 +315,7 @@ class Faster2DGSTrainer(FasterGSTrainer):
                     rgb_gt = view.rgb
                     if (supervision_alpha := get_supervision_alpha(view)) is not None:
                         rgb_gt = apply_background_color(rgb_gt, supervision_alpha, view.camera.background_color)
-                    loss = self.loss(image, rgb_gt)
+                    loss = self.loss({'rgb': image}, rgb_gt)
                     loss.backward()
                     self.model.ppisp.step()
             self.model.ppisp.create_report(self.output_directory)

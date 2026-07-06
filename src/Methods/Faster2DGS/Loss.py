@@ -110,7 +110,9 @@ class Faster2DGSLoss(BaseLoss):
         z = raw[:, 2]
         return z.exp().mean()
 
-    def forward(self, render_pkg: dict[str, torch.Tensor], target: torch.Tensor) -> torch.Tensor:
+    def forward(self, render_pkg: dict[str, torch.Tensor] | torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if isinstance(render_pkg, torch.Tensor):
+            render_pkg = {'rgb': render_pkg}
         self._render_pkg = render_pkg
         self._rgb_guide = target
         total = super().forward({
