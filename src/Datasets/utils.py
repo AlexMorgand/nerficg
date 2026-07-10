@@ -74,6 +74,23 @@ def load_image_simple(path: Path) -> torch.Tensor:
     return image
 
 
+def load_image_composited_on_background(
+    path: Path,
+    background: tuple[float, float, float] | list[float],
+) -> torch.Tensor:
+    """Load RGBA and composite onto a fixed background (3DGS-DR ``--white-background`` parity).
+
+    Matches ``rgb * alpha + background * (1 - alpha)``. RGB-only images are returned as-is.
+    """
+    image = load_image_simple(path)
+    if image.shape[0] >= 4:
+        rgb = image[:3]
+        alpha = image[3:4]
+        bg = torch.tensor(background, dtype=image.dtype, device=image.device).view(3, 1, 1)
+        return torch.lerp(bg, rgb, alpha).clamp(0.0, 1.0)
+    return image[:3].clamp(0.0, 1.0)
+
+
 def load_inverted_segmentation_mask(path: Path) -> torch.Tensor:
     """Loads a segmentation mask from the specified file and inverts it."""
     return 1.0 - load_image_simple(path)
