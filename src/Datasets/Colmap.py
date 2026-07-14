@@ -11,8 +11,9 @@ from Cameras.Perspective import PerspectiveCamera
 from Cameras.utils import RadialTangentialDistortion
 from Datasets.Base import BaseDataset
 from Datasets.utils import compute_scaled_image_size, read_image_size, View, ImageData, transform_poses_pca, BasicPointCloud, \
-    load_inverted_segmentation_mask, load_external_binary_mask, load_disparity, apply_image_scale_factor, \
-    load_optical_flow, apply_image_scale_factor_optical_flow, estimate_near_far, resolve_external_mask_path
+    load_inverted_segmentation_mask, load_external_binary_mask, load_external_world_normal_map, load_disparity, apply_image_scale_factor, \
+    load_optical_flow, apply_image_scale_factor_optical_flow, estimate_near_far, resolve_external_mask_path, \
+    resolve_external_normal_path
 from Logging import Logger
 
 
@@ -26,6 +27,7 @@ from Logging import Logger
     AABB_TOLERANCE_FACTOR=0.05,  # framework default is 0.1
     ESTIMATE_NEAR_FAR_FROM_SFM_POINTS=False,  # works well with methods that rely on tight near and far bounds
     EXTERNAL_MASKS_PATH=None,  # directory of per-image binary masks (0 ignore / 255 keep), matched to RGB filenames
+    EXTERNAL_NORMALS_PATH=None,  # directory of mesh world-normal maps (n*0.5+0.5 PNG), matched to RGB filenames
     TURNTABLE=Framework.ConfigParameterList(
         ENABLED=False,  # fixed-camera turntable capture: rotate scene/gaussians per frame instead of moving camera
         REFERENCE_FRAME_IDX=0,  # global frame index used as the fixed physical camera pose
@@ -48,6 +50,11 @@ class CustomDataset(BaseDataset):
             external_masks_root = Path(self.EXTERNAL_MASKS_PATH).expanduser()
             if not external_masks_root.is_dir():
                 raise Framework.DatasetError(f'invalid EXTERNAL_MASKS_PATH: "{external_masks_root}"')
+        external_normals_root = None
+        if self.EXTERNAL_NORMALS_PATH not in (None, ''):
+            external_normals_root = Path(self.EXTERNAL_NORMALS_PATH).expanduser()
+            if not external_normals_root.is_dir():
+                raise Framework.DatasetError(f'invalid EXTERNAL_NORMALS_PATH: "{external_normals_root}"')
         has_sfm_masks = Path(self.dataset_path / 'sfm_masks').exists()
         has_flow = Path(self.dataset_path / 'flow').exists()
         has_disp = Path(self.dataset_path / 'monoc_depth').exists()
@@ -141,6 +148,19 @@ class CustomDataset(BaseDataset):
                     )
                 else:
                     segmentation = None
+                world_normal = None
+                if external_normals_root is not None:
+                    normal_path = resolve_external_normal_path(external_normals_root, rgb_path, image_folder)
+                    if normal_path is None:
+                        raise Framework.DatasetError(
+                            f'no external normal map found for image "{rgb_path}" in "{external_normals_root}"'
+                        )
+                    world_normal = ImageData(
+                        normal_path,
+                        n_channels=3,
+                        scale_factor=self.IMAGE_SCALE_FACTOR,
+                        load_fn=load_external_world_normal_map,
+                    )
                 data.append(View(
                     camera=camera,
                     camera_index=camera_idx,
@@ -164,6 +184,7 @@ class CustomDataset(BaseDataset):
                         self.dataset_path / 'monoc_depth' / f'{image.name}.npy',
                         n_channels=1, load_fn=load_disparity, resize_fn=partial(apply_image_scale_factor, mode='nearest')
                     ) if has_disp else None,
+                    world_normal=world_normal,
                 ))
                 global_frame_idx += 1
 
@@ -178,6 +199,8 @@ class CustomDataset(BaseDataset):
                 view.c2w = c2w
             self.point_cloud.transform(transformation)
             self.scene_alignment_transform = transformation.astype(np.float64, copy=True)
+            for view in data:
+                view.exif['scene_alignment_transform'] = self.scene_alignment_transform
 
         # filter point cloud outliers
         filter_ratio = 1.0 if self.SFM_POINTS_FILTER_RATIO is None else self.SFM_POINTS_FILTER_RATIO

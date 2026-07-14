@@ -124,7 +124,7 @@ def validate_turntable_parity(
                 view=view,
                 update_densification_info=False,
                 bg_color=view.camera.background_color,
-            ).clamp(0.0, 1.0)
+            )['rgb'].clamp(0.0, 1.0)
             img_infer = renderer.render_image_inference(view, to_chw=True)['rgb']
             err = (img_fast - img_infer).abs()
             mae = float(err.mean().item())

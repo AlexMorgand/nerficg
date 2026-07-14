@@ -4,9 +4,15 @@
 !nerf_lego.yaml
 !ingp_lego.yaml
 !fastergs_dr_ball.yaml
+!fastergs_dr_car.yaml
+!fastergs_dr_coffee.yaml
 !fastergs_dr_helmet.yaml
 !fastergs_dr_teapot.yaml
+!fastergs_dr_teapot_glossy.yaml
 !fastergs_dr_toaster.yaml
+!fastergs_dr_bell.yaml
 !fastergs_dr_cat.yaml
 !fastergs_dr_luyu.yaml
+!fastergs_dr_potion.yaml
+!fastergs_dr_tbell.yaml
 !fastergs_dr_colmap_fal.yaml

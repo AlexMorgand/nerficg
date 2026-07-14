@@ -220,6 +220,58 @@ def load_external_soft_mask(path: Path) -> torch.Tensor:
     return mask.clamp(0.0, 1.0)
 
 
+def load_external_world_normal_map(path: Path) -> torch.Tensor:
+    """Load a mesh world-normal PNG encoded as ``n * 0.5 + 0.5`` -> unit (3, H, W) in [-1, 1]."""
+    image = load_image_simple(path)
+    if image.shape[0] < 3:
+        raise Framework.DatasetError(f'world normal map must have at least 3 channels: {path}')
+    rgb = image[:3]
+    normal = rgb * 2.0 - 1.0
+    norm = torch.linalg.norm(normal, dim=0, keepdim=True).clamp(min=1e-6)
+    return (normal / norm).contiguous()
+
+
+def world_normal_foreground_mask(normal_chw: torch.Tensor) -> torch.Tensor:
+    """Foreground mask for encoded world normals (black background outside the asset)."""
+    return (normal_chw[:3].amax(dim=0, keepdim=True) > 0.02).float()
+
+
+def transform_world_normal_map(normal_chw: torch.Tensor, transform: np.ndarray) -> torch.Tensor:
+    """Rotate world normals into the dataset PCA-aligned frame (matches ``BasicPointCloud.transform``)."""
+    linear = torch.as_tensor(transform[:3, :3], dtype=normal_chw.dtype, device=normal_chw.device)
+    inverse_linear = torch.linalg.inv(linear).T
+    _, height, width = normal_chw.shape
+    flat = normal_chw.permute(1, 2, 0).reshape(-1, 3) @ inverse_linear
+    aligned = flat.reshape(height, width, 3).permute(2, 0, 1)
+    norm = torch.linalg.norm(aligned, dim=0, keepdim=True).clamp(min=1e-6)
+    return (aligned / norm).contiguous()
+
+
+def resolve_external_normal_path(normals_root: Path, rgb_path: Path, images_root: Path) -> Path | None:
+    """Returns a mesh normal map path matching the RGB image name, or None if not found."""
+    image_name = rgb_path.name
+    stem = rgb_path.stem
+    try:
+        relative_path = rgb_path.relative_to(images_root)
+    except ValueError:
+        relative_path = Path(image_name)
+    relative_stem = relative_path.with_suffix('')
+    candidates = [
+        normals_root / f'{relative_stem}_normal.png',
+        normals_root / f'{relative_stem}_normal.jpg',
+        normals_root / relative_path,
+        normals_root / f'{relative_stem}.png',
+        normals_root / f'{relative_stem}.jpg',
+        normals_root / image_name,
+        normals_root / f'{stem}_normal.png',
+        normals_root / f'{stem}.png',
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
 def resolve_external_mask_path(mask_root: Path, rgb_path: Path, images_root: Path) -> Path | None:
     """Returns a mask file path matching the RGB image name, or None if not found."""
     image_name = rgb_path.name
@@ -848,6 +900,7 @@ class View:
         forward_flow: ImageData | None = None,
         backward_flow: ImageData | None = None,
         misc: ImageData | None = None,
+        world_normal: ImageData | None = None,
     ) -> None:
         self.camera = camera
         self.camera_index = camera_index
@@ -863,6 +916,7 @@ class View:
         self._forward_flow = forward_flow
         self._backward_flow = backward_flow
         self._misc = misc
+        self._world_normal = world_normal
 
     @property
     def c2w(self) -> torch.Tensor:
@@ -1060,6 +1114,20 @@ class View:
         if not isinstance(data, ImageData):
             raise Framework.DatasetError('misc must be of type ImageData')
         self._misc = data
+
+    @property
+    def world_normal(self) -> torch.Tensor | None:
+        if self._world_normal is None:
+            return None
+        return self._world_normal.image.to(Framework.config.GLOBAL.DEFAULT_DEVICE)
+
+    @world_normal.setter
+    def world_normal(self, data: ImageData) -> None:
+        if not isinstance(data, ImageData):
+            raise Framework.DatasetError('world_normal must be of type ImageData')
+        if data.n_channels != 3:
+            raise Framework.DatasetError('world_normal must have 3 channels')
+        self._world_normal = data
 
     @property
     def available_image_data(self) -> list[str]:
