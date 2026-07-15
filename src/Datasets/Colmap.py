@@ -13,7 +13,7 @@ from Datasets.Base import BaseDataset
 from Datasets.utils import compute_scaled_image_size, read_image_size, View, ImageData, transform_poses_pca, BasicPointCloud, \
     load_inverted_segmentation_mask, load_external_binary_mask, load_external_world_normal_map, load_external_albedo_map, \
     load_external_metallic_map, load_disparity, apply_image_scale_factor, \
-    load_optical_flow, apply_image_scale_factor_optical_flow, estimate_near_far, resolve_external_mask_path, \
+    load_optical_flow, apply_image_scale_factor_optical_flow, estimate_near_far, resolve_colmap_image_path, resolve_external_mask_path, \
     resolve_external_normal_path, resolve_external_albedo_path, resolve_external_metallic_roughness_path
 from Logging import Logger
 
@@ -83,7 +83,7 @@ class CustomDataset(BaseDataset):
             if not images:
                 continue
             image_folder = self.dataset_path / self.IMAGE_FOLDER
-            reference_image_path = image_folder / images[0].name
+            reference_image_path = resolve_colmap_image_path(image_folder, images[0].name)
             # load intrinsics
             match colmap_camera.model:
                 case pycolmap.CameraModelId.SIMPLE_PINHOLE:
@@ -140,7 +140,7 @@ class CustomDataset(BaseDataset):
             last_view_idx = n_views - 1
             idx2timestamp = 1 / last_view_idx
             for frame_idx, image in enumerate(images):
-                rgb_path = image_folder / image.name
+                rgb_path = resolve_colmap_image_path(image_folder, image.name)
                 if external_masks_root is not None:
                     mask_path = resolve_external_mask_path(external_masks_root, rgb_path, image_folder)
                     if mask_path is None:

@@ -247,6 +247,37 @@ def transform_world_normal_map(normal_chw: torch.Tensor, transform: np.ndarray) 
     return (aligned / norm).contiguous()
 
 
+def resolve_colmap_image_path(image_folder: Path, image_name: str) -> Path:
+    """Resolve a COLMAP image name to an on-disk path (3DGS-DR ref_real parity).
+
+    Some Ref-NeRF real captures store ``images.txt`` names with ``.JPG`` while
+    the extracted files use lowercase ``.jpg``.
+    """
+    direct = image_folder / image_name
+    if direct.exists():
+        return direct
+    suffix_swaps = (
+        ('.JPG', '.jpg'),
+        ('.JPEG', '.jpeg'),
+        ('.PNG', '.png'),
+        ('.TIF', '.tif'),
+        ('.TIFF', '.tiff'),
+    )
+    for upper_suffix, lower_suffix in suffix_swaps:
+        if image_name.endswith(upper_suffix):
+            candidate = image_folder / f'{image_name[:-len(upper_suffix)]}{lower_suffix}'
+            if candidate.exists():
+                return candidate
+        elif image_name.endswith(lower_suffix):
+            candidate = image_folder / f'{image_name[:-len(lower_suffix)]}{upper_suffix}'
+            if candidate.exists():
+                return candidate
+    raise FileNotFoundError(
+        f'no image file for COLMAP name "{image_name}" under "{image_folder}" '
+        f'(tried exact path and common extension case variants)'
+    )
+
+
 def resolve_external_normal_path(normals_root: Path, rgb_path: Path, images_root: Path) -> Path | None:
     """Returns a mesh normal map path matching the RGB image name, or None if not found."""
     image_name = rgb_path.name
