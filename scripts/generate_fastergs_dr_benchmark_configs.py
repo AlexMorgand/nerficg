@@ -24,29 +24,119 @@ class SceneSpec:
     longer_prop: int = 0
     opac_lr0_interval: int = 200
     white_background: bool = True
+    white_background_eval: bool = True
     fields: tuple[str, ...] = ('rgb',)
+    densify_extra: int = 0
+    dataset_type: str = 'RefNeRFSynthetic'
+    test_step: int = 0
+    use_env_scope: bool = False
+    env_scope_center: tuple[float, float, float] | None = None
+    env_scope_radius: float = 0.0
 
 
-SCENES: tuple[SceneSpec, ...] = (
+SYNTHETIC_SCENES: tuple[SceneSpec, ...] = (
     SceneSpec('ball', 'ball'),
     SceneSpec('car', 'car'),
     SceneSpec('coffee', 'coffee'),
-    SceneSpec('helmet', 'helmet'),
-    SceneSpec('teapot', 'teapot', fields=('rgb', 'alpha')),
+    SceneSpec('helmet', 'helmet', densify_extra=8_000),
+    SceneSpec('teapot', 'teapot', fields=('rgb', 'alpha'), densify_extra=8_000),
     SceneSpec('toaster', 'toaster', longer_prop=24_000),
     SceneSpec('bell', 'bell_blender', base_iterations=91_000, longer_prop=48_000, opac_lr0_interval=0, fields=('rgb', 'alpha')),
     SceneSpec('cat', 'cat_blender', fields=('rgb', 'alpha')),
+    SceneSpec('horse', 'horse_blender', longer_prop=36_000, fields=('rgb', 'alpha'), white_background_eval=False),
     SceneSpec('luyu', 'luyu_blender'),
     SceneSpec('potion', 'potion_blender', longer_prop=24_000),
     SceneSpec('tbell', 'tbell_blender', longer_prop=36_000, opac_lr0_interval=0, fields=('rgb', 'alpha')),
     SceneSpec('teapot_glossy', 'teapot_blender', longer_prop=36_000, fields=('rgb', 'alpha')),
 )
 
+REAL_SCENES: tuple[SceneSpec, ...] = (
+    SceneSpec(
+        'gardenspheres',
+        'gardenspheres',
+        longer_prop=36_000,
+        white_background=False,
+        dataset_type='Colmap',
+        test_step=8,
+        use_env_scope=True,
+        env_scope_center=(-0.2270, 1.9700, 1.7740),
+        env_scope_radius=0.974,
+    ),
+    SceneSpec(
+        'sedan',
+        'sedan',
+        longer_prop=36_000,
+        white_background=False,
+        dataset_type='Colmap',
+        test_step=8,
+        use_env_scope=True,
+        env_scope_center=(-0.032, 0.808, 0.751),
+        env_scope_radius=2.138,
+    ),
+    SceneSpec(
+        'toycar',
+        'toycar',
+        longer_prop=36_000,
+        white_background=False,
+        dataset_type='Colmap',
+        test_step=8,
+        use_env_scope=True,
+        env_scope_center=(0.6810, 0.8080, 4.4550),
+        env_scope_radius=2.707,
+    ),
+)
+
+SCENES: tuple[SceneSpec, ...] = SYNTHETIC_SCENES + REAL_SCENES
+
 
 def _build_config(spec: SceneSpec) -> dict:
     total_iters = spec.base_iterations + spec.longer_prop + 1
-    densify_end = DENSIFY_BASE + spec.longer_prop
+    specular_extra = spec.densify_extra
+    densify_end = DENSIFY_BASE + spec.longer_prop + specular_extra
+    propagation_end = PROPAGATION_BASE + specular_extra
     bg = [1.0, 1.0, 1.0] if spec.white_background else [0.0, 0.0, 0.0]
+    dr_schedule: dict = {
+        'INIT_UNTIL_ITERATION': 3_000,
+        'PROPAGATION_INTERVAL': 1_000,
+        'PROPAGATION_END_ITERATION': propagation_end,
+        'LONGER_PROPAGATION_ITERATIONS': spec.longer_prop,
+        'PROPAGATION_ENLARGE_SCALE': 1.5,
+        'PROPAGATION_MIN_OPACITY': 0.9,
+        'PROPAGATION_OPACITY_FLOOR': 0.01,
+        'PROPAGATION_MIN_REFLECTION': 0.001,
+        'SCALE_ENLARGE_THRESHOLD': 0.02,
+        'COLOR_SABOTAGE_THRESHOLD': 0.05,
+        'REFLECTION_THRESHOLD': 0.1,
+        'COLOR_SABOTAGE_NOISE': 0.4,
+        'SPECULAR_TERMINATION_PATIENCE': 0,
+        'OPAC_LR0_INTERVAL': spec.opac_lr0_interval,
+        'ENVMAP_LEARNING_RATE': 0.05,
+        'DENSIFICATION_INTERVAL_DURING_PROPAGATION': 500,
+        'PARITY_DIFFUSE_BOOTSTRAP': True,
+        'USE_ENV_SCOPE': spec.use_env_scope,
+        'ENV_SCOPE_CENTER': list(spec.env_scope_center) if spec.env_scope_center else [0.0, 0.0, 0.0],
+        'ENV_SCOPE_RADIUS': spec.env_scope_radius,
+        'REFL_MASK_LOSS_WEIGHT': 0.4,
+    }
+    dataset: dict = {
+        'PATH': str(DATA_ROOT / spec.data_subdir),
+        'IMAGE_SCALE_FACTOR': 1,
+        'NORMALIZE_CUBE': None,
+        'NORMALIZE_RECENTER': False,
+        'BACKGROUND_COLOR': bg,
+        'WHITE_BACKGROUND': spec.white_background,
+        'NEAR_PLANE': 0.2,
+        'FAR_PLANE': 10000.0,
+        'APPLY_PCA': False,
+        'APPLY_PCA_RESCALE': False,
+    }
+    if spec.dataset_type == 'RefNeRFSynthetic':
+        dataset['WHITE_BACKGROUND_EVAL'] = spec.white_background_eval
+        dataset['POINT_CLOUD_FILE'] = 'points3d.ply'
+    else:
+        dataset['TEST_STEP'] = spec.test_step
+        dataset['IMAGE_FOLDER'] = 'images'
+        dataset['SFM_POINTS_FILTER_RATIO'] = 1.0
     return {
         'GLOBAL': {
             'LOG_LEVEL': 2,
@@ -55,12 +145,12 @@ def _build_config(spec: SceneSpec) -> dict:
             'ANOMALY_DETECTION': False,
             'FILTER_WARNINGS': True,
             'METHOD_TYPE': 'FasterGS',
-            'DATASET_TYPE': 'RefNeRFSynthetic',
+            'DATASET_TYPE': spec.dataset_type,
         },
         'MODEL': {
             'SH_DEGREE': 3,
             'PPISP': {'USE': False, 'CONTROLLER_TRAINING_STEPS': 5_000, 'CONTROLLER_DISTILLATION': True},
-            'DEFERRED_REFLECTION': {'USE': True, 'REFL_INIT_VALUE': 0.001, 'ENVMAP_RESOLUTION': 256},
+            'DEFERRED_REFLECTION': {'USE': True, 'REFL_INIT_VALUE': 0.001, 'ENVMAP_RESOLUTION': 128},
         },
         'RENDERER': {
             'SCALE_MODIFIER': 1.0,
@@ -131,7 +221,7 @@ def _build_config(spec: SceneSpec) -> dict:
             'OPACITY_RESET_INTERVAL': 3_000,
             'EXTRA_OPACITY_RESET_ITERATION': 500,
             'MORTON_ORDERING_INTERVAL': 5_000,
-            'MORTON_ORDERING_END_ITERATION': DENSIFY_BASE,
+            'MORTON_ORDERING_END_ITERATION': densify_end,
             'FILTER_3D': {'USE': False, 'ORIGINAL_FORMULATION': False, 'FILTER_VARIANCE': 0.2},
             'USE_RANDOM_BACKGROUND_COLOR': False,
             'RANDOM_BACKGROUND_IF_ALPHA_OR_MASK': False,
@@ -161,38 +251,9 @@ def _build_config(spec: SceneSpec) -> dict:
                 'LEARNING_RATE_ROTATIONS': 0.001,
                 'LEARNING_RATE_REFLECTION_STRENGTH': 0.006,
             },
-            'DEFERRED_REFLECTION_SCHEDULE': {
-                'INIT_UNTIL_ITERATION': 3_000,
-                'PROPAGATION_INTERVAL': 1_000,
-                'PROPAGATION_END_ITERATION': PROPAGATION_BASE,
-                'LONGER_PROPAGATION_ITERATIONS': spec.longer_prop,
-                'PROPAGATION_ENLARGE_SCALE': 1.5,
-                'PROPAGATION_MIN_OPACITY': 0.9,
-                'PROPAGATION_OPACITY_FLOOR': 0.01,
-                'PROPAGATION_MIN_REFLECTION': 0.001,
-                'SCALE_ENLARGE_THRESHOLD': 0.02,
-                'COLOR_SABOTAGE_THRESHOLD': 0.05,
-                'REFLECTION_THRESHOLD': 0.1,
-                'COLOR_SABOTAGE_NOISE': 0.4,
-                'SPECULAR_TERMINATION_PATIENCE': 0,
-                'OPAC_LR0_INTERVAL': spec.opac_lr0_interval,
-                'ENVMAP_LEARNING_RATE': 0.05,
-                'DENSIFICATION_INTERVAL_DURING_PROPAGATION': 500,
-            },
+            'DEFERRED_REFLECTION_SCHEDULE': dr_schedule,
         },
-        'DATASET': {
-            'PATH': str(DATA_ROOT / spec.data_subdir),
-            'IMAGE_SCALE_FACTOR': 1,
-            'NORMALIZE_CUBE': None,
-            'NORMALIZE_RECENTER': False,
-            'BACKGROUND_COLOR': bg,
-            'WHITE_BACKGROUND': spec.white_background,
-            'NEAR_PLANE': 0.2,
-            'FAR_PLANE': 10000.0,
-            'APPLY_PCA': False,
-            'APPLY_PCA_RESCALE': False,
-            'POINT_CLOUD_FILE': 'points3d.ply',
-        },
+        'DATASET': dataset,
     }
 
 
@@ -203,11 +264,15 @@ def main() -> None:
         cfg = _build_config(spec)
         with open(path, 'w', encoding='utf-8') as f:
             yaml.safe_dump(cfg, f, sort_keys=False)
-        prop_end = PROPAGATION_BASE + spec.longer_prop
+        propagation_end = PROPAGATION_BASE + spec.densify_extra
+        effective_prop_end = propagation_end + spec.longer_prop
+        densify_end = DENSIFY_BASE + spec.longer_prop + spec.densify_extra
+        env_scope = f'env_scope r={spec.env_scope_radius}' if spec.use_env_scope else 'no env_scope'
         print(
-            f'wrote {path.name}: iters={cfg["TRAINING"]["NUM_ITERATIONS"]:,}, '
-            f'prop_until={prop_end:,}, densify_until={cfg["TRAINING"]["DENSIFICATION_END_ITERATION"]:,}, '
-            f'opac_lr0={spec.opac_lr0_interval}'
+            f'wrote {path.name}: loader={spec.dataset_type}, iters={cfg["TRAINING"]["NUM_ITERATIONS"]:,}, '
+            f'prop_until={effective_prop_end:,}, densify_until={densify_end:,}, '
+            f'opac_lr0={spec.opac_lr0_interval}, densify_extra={spec.densify_extra}, '
+            f'white_bg_eval={spec.white_background_eval}, {env_scope}'
         )
 
 

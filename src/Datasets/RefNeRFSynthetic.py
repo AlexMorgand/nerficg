@@ -10,6 +10,9 @@ Same ``transforms_{train,test}.json`` layout as the NeRF synthetic dataset, but:
   - ``WHITE_BACKGROUND`` (default True) matches 3DGS-DR ``--white-background``:
     RGBA frames are composited onto ``BACKGROUND_COLOR`` at load time and alpha
     is dropped so training uses a fixed background instead of random compositing.
+  - ``WHITE_BACKGROUND_EVAL`` (default True): when False, the test split keeps raw
+    RGBA (no white composite) so metrics use alpha-masked object pixels only.
+    Some NeRO scenes (e.g. horse) train on white but evaluate against original plates.
 """
 
 import json
@@ -66,6 +69,7 @@ def _load_point_cloud(path: Path) -> BasicPointCloud | None:
     PATH='dataset/ref_nerf/ball',
     BACKGROUND_COLOR=[1.0, 1.0, 1.0],
     WHITE_BACKGROUND=True,  # 3DGS-DR --white-background: bake RGBA onto BACKGROUND_COLOR at load
+    WHITE_BACKGROUND_EVAL=True,  # False = test split keeps raw RGBA for masked eval
     NORMALIZE_CUBE=4.0 / 1.5,
     NEAR_PLANE=2.0,
     FAR_PLANE=6.0,
@@ -88,11 +92,32 @@ class CustomDataset(BaseDataset):
         data: dict[str, list[View]] = {subset: [] for subset in self.subsets}
         global_frame_idx = 0
         white_background = bool(getattr(self, 'WHITE_BACKGROUND', False))
+        white_background_eval = bool(getattr(self, 'WHITE_BACKGROUND_EVAL', True))
         if white_background:
-            Logger.log_info(
-                f'white-background mode: compositing RGBA onto BACKGROUND_COLOR={self.BACKGROUND_COLOR} at load (3DGS-DR parity)'
-            )
             rgb_load_fn = partial(load_image_composited_on_background, background=self.BACKGROUND_COLOR)
+            if white_background_eval:
+                Logger.log_info(
+                    f'white-background mode: compositing RGBA onto BACKGROUND_COLOR={self.BACKGROUND_COLOR} at load (3DGS-DR parity)'
+                )
+            else:
+                Logger.log_info(
+                    f'white-background mode: compositing train RGBA onto BACKGROUND_COLOR={self.BACKGROUND_COLOR}; '
+                    'test split keeps raw RGBA for masked evaluation'
+                )
+        has_alpha = False
+        if not white_background or not white_background_eval:
+            for subset in self.subsets:
+                metadata_filepath = self.dataset_path / f'transforms_{subset}.json'
+                if not metadata_filepath.exists():
+                    continue
+                with open(metadata_filepath, 'r') as f:
+                    metadata_file = json.load(f)
+                first_path = self.dataset_path / f'{metadata_file["frames"][0]["file_path"]}'
+                if first_path.suffix == '':
+                    first_path = first_path.with_suffix('.png')
+                if _image_channel_count(first_path) >= 4:
+                    has_alpha = True
+                    break
         for subset in self.subsets:
             metadata_filepath: Path = self.dataset_path / f'transforms_{subset}.json'
             if not metadata_filepath.exists():
@@ -102,12 +127,6 @@ class CustomDataset(BaseDataset):
                 metadata_file: dict[str, Any] = json.load(f)
 
             frames = metadata_file['frames']
-            has_alpha = False
-            if not white_background:
-                first_path = self.dataset_path / f'{frames[0]["file_path"]}'
-                if first_path.suffix == '':
-                    first_path = first_path.with_suffix(".png")
-                has_alpha = _image_channel_count(first_path) >= 4
 
             for frame_idx, frame in Logger.log_progress(enumerate(frames), desc=subset, leave=False, total=len(frames)):
                 rgba_path = self.dataset_path / f'{frame["file_path"]}'
@@ -123,7 +142,8 @@ class CustomDataset(BaseDataset):
                     raise Framework.DatasetError('the RefNeRFSynthetic loader requires all views to have the same image size and focal length.')
 
                 c2w = world_transform @ frame['transform_matrix'] @ cam_transform.T
-                if white_background:
+                composite_white = white_background and (subset != 'test' or white_background_eval)
+                if composite_white:
                     rgb = ImageData(
                         rgba_path,
                         n_channels=3,

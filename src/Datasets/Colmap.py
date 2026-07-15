@@ -11,9 +11,10 @@ from Cameras.Perspective import PerspectiveCamera
 from Cameras.utils import RadialTangentialDistortion
 from Datasets.Base import BaseDataset
 from Datasets.utils import compute_scaled_image_size, read_image_size, View, ImageData, transform_poses_pca, BasicPointCloud, \
-    load_inverted_segmentation_mask, load_external_binary_mask, load_external_world_normal_map, load_disparity, apply_image_scale_factor, \
+    load_inverted_segmentation_mask, load_external_binary_mask, load_external_world_normal_map, load_external_albedo_map, \
+    load_external_metallic_map, load_disparity, apply_image_scale_factor, \
     load_optical_flow, apply_image_scale_factor_optical_flow, estimate_near_far, resolve_external_mask_path, \
-    resolve_external_normal_path
+    resolve_external_normal_path, resolve_external_albedo_path, resolve_external_metallic_roughness_path
 from Logging import Logger
 
 
@@ -28,6 +29,8 @@ from Logging import Logger
     ESTIMATE_NEAR_FAR_FROM_SFM_POINTS=False,  # works well with methods that rely on tight near and far bounds
     EXTERNAL_MASKS_PATH=None,  # directory of per-image binary masks (0 ignore / 255 keep), matched to RGB filenames
     EXTERNAL_NORMALS_PATH=None,  # directory of mesh world-normal maps (n*0.5+0.5 PNG), matched to RGB filenames
+    EXTERNAL_ALBEDO_PATH=None,  # directory of mesh albedo maps, matched to RGB filenames
+    EXTERNAL_METALLIC_ROUGHNESS_PATH=None,  # directory of metallic/roughness maps (R=metallic), matched to RGB filenames
     TURNTABLE=Framework.ConfigParameterList(
         ENABLED=False,  # fixed-camera turntable capture: rotate scene/gaussians per frame instead of moving camera
         REFERENCE_FRAME_IDX=0,  # global frame index used as the fixed physical camera pose
@@ -55,6 +58,16 @@ class CustomDataset(BaseDataset):
             external_normals_root = Path(self.EXTERNAL_NORMALS_PATH).expanduser()
             if not external_normals_root.is_dir():
                 raise Framework.DatasetError(f'invalid EXTERNAL_NORMALS_PATH: "{external_normals_root}"')
+        external_albedo_root = None
+        if self.EXTERNAL_ALBEDO_PATH not in (None, ''):
+            external_albedo_root = Path(self.EXTERNAL_ALBEDO_PATH).expanduser()
+            if not external_albedo_root.is_dir():
+                raise Framework.DatasetError(f'invalid EXTERNAL_ALBEDO_PATH: "{external_albedo_root}"')
+        external_mr_root = None
+        if self.EXTERNAL_METALLIC_ROUGHNESS_PATH not in (None, ''):
+            external_mr_root = Path(self.EXTERNAL_METALLIC_ROUGHNESS_PATH).expanduser()
+            if not external_mr_root.is_dir():
+                raise Framework.DatasetError(f'invalid EXTERNAL_METALLIC_ROUGHNESS_PATH: "{external_mr_root}"')
         has_sfm_masks = Path(self.dataset_path / 'sfm_masks').exists()
         has_flow = Path(self.dataset_path / 'flow').exists()
         has_disp = Path(self.dataset_path / 'monoc_depth').exists()
@@ -161,6 +174,32 @@ class CustomDataset(BaseDataset):
                         scale_factor=self.IMAGE_SCALE_FACTOR,
                         load_fn=load_external_world_normal_map,
                     )
+                mesh_albedo = None
+                if external_albedo_root is not None:
+                    albedo_path = resolve_external_albedo_path(external_albedo_root, rgb_path, image_folder)
+                    if albedo_path is None:
+                        raise Framework.DatasetError(
+                            f'no external albedo map found for image "{rgb_path}" in "{external_albedo_root}"'
+                        )
+                    mesh_albedo = ImageData(
+                        albedo_path,
+                        n_channels=3,
+                        scale_factor=self.IMAGE_SCALE_FACTOR,
+                        load_fn=load_external_albedo_map,
+                    )
+                mesh_metallic = None
+                if external_mr_root is not None:
+                    mr_path = resolve_external_metallic_roughness_path(external_mr_root, rgb_path, image_folder)
+                    if mr_path is None:
+                        raise Framework.DatasetError(
+                            f'no external metallic map found for image "{rgb_path}" in "{external_mr_root}"'
+                        )
+                    mesh_metallic = ImageData(
+                        mr_path,
+                        n_channels=1,
+                        scale_factor=self.IMAGE_SCALE_FACTOR,
+                        load_fn=load_external_metallic_map,
+                    )
                 data.append(View(
                     camera=camera,
                     camera_index=camera_idx,
@@ -185,6 +224,8 @@ class CustomDataset(BaseDataset):
                         n_channels=1, load_fn=load_disparity, resize_fn=partial(apply_image_scale_factor, mode='nearest')
                     ) if has_disp else None,
                     world_normal=world_normal,
+                    mesh_albedo=mesh_albedo,
+                    mesh_metallic=mesh_metallic,
                 ))
                 global_frame_idx += 1
 

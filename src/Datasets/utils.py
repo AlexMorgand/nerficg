@@ -272,6 +272,74 @@ def resolve_external_normal_path(normals_root: Path, rgb_path: Path, images_root
     return None
 
 
+def resolve_external_albedo_path(albedo_root: Path, rgb_path: Path, images_root: Path) -> Path | None:
+    """Returns a mesh albedo map path matching the RGB image name, or None if not found."""
+    image_name = rgb_path.name
+    stem = rgb_path.stem
+    try:
+        relative_path = rgb_path.relative_to(images_root)
+    except ValueError:
+        relative_path = Path(image_name)
+    relative_stem = relative_path.with_suffix('')
+    candidates = [
+        albedo_root / relative_path,
+        albedo_root / f'{relative_stem}.png',
+        albedo_root / f'{relative_stem}.jpg',
+        albedo_root / f'{relative_stem}_albedo.png',
+        albedo_root / image_name,
+        albedo_root / f'{stem}.png',
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+def resolve_external_metallic_roughness_path(mr_root: Path, rgb_path: Path, images_root: Path) -> Path | None:
+    """Returns a metallic/roughness map path matching the RGB image name, or None if not found."""
+    image_name = rgb_path.name
+    stem = rgb_path.stem
+    try:
+        relative_path = rgb_path.relative_to(images_root)
+    except ValueError:
+        relative_path = Path(image_name)
+    relative_stem = relative_path.with_suffix('')
+    candidates = [
+        mr_root / relative_path,
+        mr_root / f'{relative_stem}.png',
+        mr_root / f'{relative_stem}.jpg',
+        mr_root / f'{relative_stem}_mr.png',
+        mr_root / image_name,
+        mr_root / f'{stem}.png',
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+def load_external_albedo_map(path: Path) -> torch.Tensor:
+    """Load mesh albedo RGB in [0, 1] as (3, H, W)."""
+    image = load_image_simple(path)
+    if image.shape[0] < 3:
+        raise Framework.DatasetError(f'albedo map must have at least 3 channels: {path}')
+    return image[:3].clamp(0.0, 1.0).contiguous()
+
+
+def load_external_metallic_map(path: Path) -> torch.Tensor:
+    """Load mesh metallic (R channel of metallic_roughness) in [0, 1] as (1, H, W)."""
+    image = load_image_simple(path)
+    if image.shape[0] < 1:
+        raise Framework.DatasetError(f'metallic map must have at least 1 channel: {path}')
+    return image[:1].clamp(0.0, 1.0).contiguous()
+
+
+def gbuffer_foreground_mask(chw: torch.Tensor) -> torch.Tensor:
+    """Foreground mask for mesh g-buffer maps with black background."""
+    channels = chw[:3] if chw.shape[0] >= 3 else chw
+    return (channels.amax(dim=0, keepdim=True) > 0.02).float()
+
+
 def resolve_external_mask_path(mask_root: Path, rgb_path: Path, images_root: Path) -> Path | None:
     """Returns a mask file path matching the RGB image name, or None if not found."""
     image_name = rgb_path.name
@@ -901,6 +969,8 @@ class View:
         backward_flow: ImageData | None = None,
         misc: ImageData | None = None,
         world_normal: ImageData | None = None,
+        mesh_albedo: ImageData | None = None,
+        mesh_metallic: ImageData | None = None,
     ) -> None:
         self.camera = camera
         self.camera_index = camera_index
@@ -917,6 +987,8 @@ class View:
         self._backward_flow = backward_flow
         self._misc = misc
         self._world_normal = world_normal
+        self._mesh_albedo = mesh_albedo
+        self._mesh_metallic = mesh_metallic
 
     @property
     def c2w(self) -> torch.Tensor:
@@ -1128,6 +1200,34 @@ class View:
         if data.n_channels != 3:
             raise Framework.DatasetError('world_normal must have 3 channels')
         self._world_normal = data
+
+    @property
+    def mesh_albedo(self) -> torch.Tensor | None:
+        if self._mesh_albedo is None:
+            return None
+        return self._mesh_albedo.image.to(Framework.config.GLOBAL.DEFAULT_DEVICE)
+
+    @mesh_albedo.setter
+    def mesh_albedo(self, data: ImageData) -> None:
+        if not isinstance(data, ImageData):
+            raise Framework.DatasetError('mesh_albedo must be of type ImageData')
+        if data.n_channels != 3:
+            raise Framework.DatasetError('mesh_albedo must have 3 channels')
+        self._mesh_albedo = data
+
+    @property
+    def mesh_metallic(self) -> torch.Tensor | None:
+        if self._mesh_metallic is None:
+            return None
+        return self._mesh_metallic.image.to(Framework.config.GLOBAL.DEFAULT_DEVICE)
+
+    @mesh_metallic.setter
+    def mesh_metallic(self, data: ImageData) -> None:
+        if not isinstance(data, ImageData):
+            raise Framework.DatasetError('mesh_metallic must be of type ImageData')
+        if data.n_channels != 1:
+            raise Framework.DatasetError('mesh_metallic must have 1 channel')
+        self._mesh_metallic = data
 
     @property
     def available_image_data(self) -> list[str]:

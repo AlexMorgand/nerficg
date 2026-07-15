@@ -27,6 +27,9 @@ TARGET_METRICS: dict[str, dict[str, float]] = {
     'potion': {'PSNR': 32.29, 'SSIM': 0.957, 'LPIPS': 0.075},
     'tbell': {'PSNR': 28.94, 'SSIM': 0.952, 'LPIPS': 0.067},
     'teapot_glossy': {'PSNR': 25.36, 'SSIM': 0.936, 'LPIPS': 0.067},
+    'gardenspheres': {'PSNR': 21.82, 'SSIM': 0.889, 'LPIPS': 0.098},
+    'sedan': {'PSNR': 26.32, 'SSIM': 0.933, 'LPIPS': 0.054},
+    'toycar': {'PSNR': 23.83, 'SSIM': 0.915, 'LPIPS': 0.068},
 }
 
 DEFAULT_SCENES = tuple(TARGET_METRICS.keys())
