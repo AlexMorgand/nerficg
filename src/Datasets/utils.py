@@ -365,6 +365,16 @@ def load_external_metallic_map(path: Path) -> torch.Tensor:
     return image[:1].clamp(0.0, 1.0).contiguous()
 
 
+def load_external_roughness_map(path: Path) -> torch.Tensor:
+    """Load mesh roughness (G channel of metallic_roughness) in [0, 1] as (1, H, W)."""
+    image = load_image_simple(path)
+    if image.shape[0] < 2:
+        raise Framework.DatasetError(
+            f'roughness map requires at least 2 channels (R=metallic, G=roughness): {path}'
+        )
+    return image[1:2].clamp(0.0, 1.0).contiguous()
+
+
 def gbuffer_foreground_mask(chw: torch.Tensor) -> torch.Tensor:
     """Foreground mask for mesh g-buffer maps with black background."""
     channels = chw[:3] if chw.shape[0] >= 3 else chw
@@ -1002,6 +1012,7 @@ class View:
         world_normal: ImageData | None = None,
         mesh_albedo: ImageData | None = None,
         mesh_metallic: ImageData | None = None,
+        mesh_roughness: ImageData | None = None,
     ) -> None:
         self.camera = camera
         self.camera_index = camera_index
@@ -1020,6 +1031,7 @@ class View:
         self._world_normal = world_normal
         self._mesh_albedo = mesh_albedo
         self._mesh_metallic = mesh_metallic
+        self._mesh_roughness = mesh_roughness
 
     @property
     def c2w(self) -> torch.Tensor:
@@ -1259,6 +1271,20 @@ class View:
         if data.n_channels != 1:
             raise Framework.DatasetError('mesh_metallic must have 1 channel')
         self._mesh_metallic = data
+
+    @property
+    def mesh_roughness(self) -> torch.Tensor | None:
+        if self._mesh_roughness is None:
+            return None
+        return self._mesh_roughness.image.to(Framework.config.GLOBAL.DEFAULT_DEVICE)
+
+    @mesh_roughness.setter
+    def mesh_roughness(self, data: ImageData) -> None:
+        if not isinstance(data, ImageData):
+            raise Framework.DatasetError('mesh_roughness must be of type ImageData')
+        if data.n_channels != 1:
+            raise Framework.DatasetError('mesh_roughness must have 1 channel')
+        self._mesh_roughness = data
 
     @property
     def available_image_data(self) -> list[str]:

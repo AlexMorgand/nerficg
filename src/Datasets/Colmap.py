@@ -12,7 +12,7 @@ from Cameras.utils import RadialTangentialDistortion
 from Datasets.Base import BaseDataset
 from Datasets.utils import compute_scaled_image_size, read_image_size, View, ImageData, transform_poses_pca, BasicPointCloud, \
     load_inverted_segmentation_mask, load_external_binary_mask, load_external_world_normal_map, load_external_albedo_map, \
-    load_external_metallic_map, load_disparity, apply_image_scale_factor, \
+    load_external_metallic_map, load_external_roughness_map, load_disparity, apply_image_scale_factor, \
     load_optical_flow, apply_image_scale_factor_optical_flow, estimate_near_far, resolve_colmap_image_path, resolve_external_mask_path, \
     resolve_external_normal_path, resolve_external_albedo_path, resolve_external_metallic_roughness_path
 from Logging import Logger
@@ -188,6 +188,7 @@ class CustomDataset(BaseDataset):
                         load_fn=load_external_albedo_map,
                     )
                 mesh_metallic = None
+                mesh_roughness = None
                 if external_mr_root is not None:
                     mr_path = resolve_external_metallic_roughness_path(external_mr_root, rgb_path, image_folder)
                     if mr_path is None:
@@ -199,6 +200,12 @@ class CustomDataset(BaseDataset):
                         n_channels=1,
                         scale_factor=self.IMAGE_SCALE_FACTOR,
                         load_fn=load_external_metallic_map,
+                    )
+                    mesh_roughness = ImageData(
+                        mr_path,
+                        n_channels=1,
+                        scale_factor=self.IMAGE_SCALE_FACTOR,
+                        load_fn=load_external_roughness_map,
                     )
                 data.append(View(
                     camera=camera,
@@ -226,6 +233,7 @@ class CustomDataset(BaseDataset):
                     world_normal=world_normal,
                     mesh_albedo=mesh_albedo,
                     mesh_metallic=mesh_metallic,
+                    mesh_roughness=mesh_roughness,
                 ))
                 global_frame_idx += 1
 
