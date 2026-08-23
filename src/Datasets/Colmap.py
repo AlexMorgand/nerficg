@@ -11,7 +11,7 @@ from Cameras.Perspective import PerspectiveCamera
 from Cameras.utils import RadialTangentialDistortion
 from Datasets.Base import BaseDataset
 from Datasets.utils import compute_scaled_image_size, read_image_size, View, ImageData, transform_poses_pca, BasicPointCloud, \
-    load_inverted_segmentation_mask, load_external_binary_mask, load_disparity, apply_image_scale_factor, \
+    load_inverted_segmentation_mask, load_external_binary_mask, load_external_soft_mask, load_disparity, apply_image_scale_factor, \
     load_optical_flow, apply_image_scale_factor_optical_flow, estimate_near_far, resolve_external_mask_path
 from Logging import Logger
 
@@ -25,7 +25,8 @@ from Logging import Logger
     SFM_POINTS_FILTER_RATIO=1.0,  # 0.95 works well in practice
     AABB_TOLERANCE_FACTOR=0.05,  # framework default is 0.1
     ESTIMATE_NEAR_FAR_FROM_SFM_POINTS=False,  # works well with methods that rely on tight near and far bounds
-    EXTERNAL_MASKS_PATH=None,  # directory of per-image binary masks (0 ignore / 255 keep), matched to RGB filenames
+    EXTERNAL_MASKS_PATH=None,  # directory of per-image masks (0 ignore / 255 keep), matched to RGB filenames
+    EXTERNAL_MASKS_BINARY=True,  # True: threshold the mask at 0.5. False: keep soft alpha, which preserves fur and hair edges
     TURNTABLE=Framework.ConfigParameterList(
         ENABLED=False,  # fixed-camera turntable capture: rotate scene/gaussians per frame instead of moving camera
         REFERENCE_FRAME_IDX=0,  # global frame index used as the fixed physical camera pose
@@ -127,11 +128,26 @@ class CustomDataset(BaseDataset):
                         raise Framework.DatasetError(
                             f'no external mask found for image "{rgb_path}" in "{external_masks_root}"'
                         )
+                    # Soft mattes carry the partial coverage that thin
+                    # structures live in; thresholding at 0.5 deletes it.
+                    # Resize must match: 'nearest' would re-quantise a soft
+                    # matte at any scale factor other than 1.
+                    # Configs written before this option exists must keep
+                    # working: the loader raises on a declared parameter that
+                    # is absent from the yaml, so read it defensively and
+                    # default to the historical behaviour.
+                    try:
+                        binary_masks = self.EXTERNAL_MASKS_BINARY
+                    except AttributeError:
+                        binary_masks = True
                     segmentation = ImageData(
                         mask_path,
                         n_channels=1, scale_factor=self.IMAGE_SCALE_FACTOR,
-                        load_fn=load_external_binary_mask,
-                        resize_fn=partial(apply_image_scale_factor, mode='nearest'),
+                        load_fn=load_external_binary_mask if binary_masks else load_external_soft_mask,
+                        resize_fn=partial(
+                            apply_image_scale_factor,
+                            mode='nearest' if binary_masks else 'bilinear',
+                        ),
                     )
                 elif has_sfm_masks:
                     segmentation = ImageData(
