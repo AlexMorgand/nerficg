@@ -86,6 +86,8 @@ A flexible PyTorch framework for simple and efficient implementation of radiance
 
 ## Creating a Configuration File
 
+For two-axis Gaussian disk training, see the [FasterGS2D Garden recipe](docs/fastergs2d.md).
+
 To create a configuration file for training, run
 ```
 python ./scripts/create_config.py -m <METHOD_NAME> -d <DATASET_TYPE> -o <CONFIG_NAME>
