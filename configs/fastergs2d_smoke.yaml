@@ -1,0 +1,29 @@
+GLOBAL:
+    METHOD_TYPE: FasterGS2D
+    DATASET_TYPE: MipNeRF360
+MODEL:
+    SH_DEGREE: 3
+    PPISP:
+        USE: false
+RENDERER:
+    PROPER_ANTIALIASING: false
+    DEPTH_RATIO: 0.0
+TRAINING:
+    LOAD_CHECKPOINT: null
+    MODEL_NAME: fastergs2d_smoke
+    NUM_ITERATIONS: 20
+    # No inherited 3D threshold: growth-capable runs require an explicitly calibrated policy.
+    DENSIFICATION_GRAD_THRESHOLD: null
+    GUI:
+        ACTIVATE: false
+    DATA:
+        PRELOADING_LEVEL: 0
+    BACKUP:
+        RENDER_TESTSET: false
+        INTERMEDIATE_RENDERINGS: false
+    WANDB:
+        ACTIVATE: false
+DATASET:
+    PATH: dataset/garden
+    IMAGE_SCALE_FACTOR: 0.25
+    TEST_STEP: 8
